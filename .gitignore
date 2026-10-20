@@ -1,0 +1,17 @@
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Large original dataset — do not upload
+creditcard.csv
+
+# Secrets and local environment files
+.env
+.streamlit/secrets.toml
+
+# Editor and OS files
+.vscode/
+.DS_Store
