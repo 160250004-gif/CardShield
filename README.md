@@ -1,15 +1,18 @@
-# Credit Card Fraud Detection System
+# CardShield – Credit Card Fraud Detection System
 
-An AI/ML project that demonstrates credit card transaction fraud prediction using a trained machine learning model.
+An AI/ML project that predicts potentially fraudulent credit card transactions using a trained machine learning model. It includes an interactive Streamlit dashboard and a FastAPI backend with prediction history stored in SQLite.
 
 ## Features
 
 - Machine learning-based fraud prediction
-- Streamlit dashboard
-- Transaction data upload and analysis
-- Historical dataset analytics when the dataset is available
-- Model performance comparison
-- Demo transaction dataset
+- Interactive Streamlit dashboard
+- Transaction CSV upload and screening
+- Fraud analytics and model performance comparison
+- FastAPI REST API for transaction predictions
+- Single and batch prediction endpoints
+- SQLite database for prediction history
+- API health and model feature endpoints
+- Demo transaction dataset for testing
 
 ## Tech Stack
 
@@ -17,33 +20,70 @@ An AI/ML project that demonstrates credit card transaction fraud prediction usin
 - Pandas and NumPy
 - Scikit-learn
 - Streamlit
-- FastAPI
+- FastAPI and Uvicorn
+- SQLite
 - Matplotlib and Seaborn
-
-## Run Locally
-
-1. Create and activate a Python virtual environment.
-2. Install dependencies:
-
-   pip install -r requirements.txt
-
-3. Start the Streamlit app:
-
-   python -m streamlit run app.py
 
 ## Project Files
 
-- app.py — Streamlit dashboard
-- api.py — API implementation
-- fraud_model.pkl — trained model
-- train_model.py — model training script
-- demo_transactions.csv — sample transaction data
+- `app.py` — Streamlit dashboard
+- `api.py` — FastAPI backend and prediction history
+- `fraud_model.pkl` — trained machine learning model
+- `train_model.py` — model training script
+- `demo_transactions.csv` — sample transaction data
+- `make_demo_data.py` — demo dataset generator
+- `model_comparison.csv` — model comparison results
+- `requirements.txt` — Python dependencies
+- `tests/` — automated API tests (add after creating the tests)
+
+## Run Locally
+
+### 1. Clone or download the repository
+
+Open the project folder in VS Code.
+
+### 2. Create a virtual environment
+
+```bash
+python -m venv .venv
+```
+
+### 3. Activate the environment (Windows PowerShell)
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+### 4. Install dependencies
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 5. Start the Streamlit dashboard
+
+```bash
+python -m streamlit run app.py
+```
+
+### 6. Start the FastAPI backend
+
+Open a second terminal in the project folder and run:
+
+```bash
+python -m uvicorn api:app --reload --port 8000
+```
+
+API documentation: http://127.0.0.1:8000/docs
+
+Health check: http://127.0.0.1:8000/health
 
 ## Dataset
 
-The original creditcard.csv dataset is not included in this repository.
-Historical analytics may require the original dataset.
+The original `creditcard.csv` dataset is not included in this repository. Some historical analytics or model-training operations may require the original dataset.
+
+Use only appropriate sample data when testing the application. Do not upload confidential cardholder information.
 
 ## Disclaimer
 
-This is an educational demonstration project, not a production banking or payment security system.
+This project is intended for educational and demonstration purposes. A model prediction is a risk alert, not proof of fraud, and this project is not a production banking or payment security system.

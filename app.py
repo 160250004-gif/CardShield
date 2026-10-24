@@ -4,8 +4,13 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sqlite3
+import hashlib
+import hmac
+import secrets
+import re
 from pathlib import Path
-from sklearn.metrics import (
+from sklearn.metrics import(
     precision_score, recall_score, f1_score, confusion_matrix,
     accuracy_score, average_precision_score
 )
@@ -20,8 +25,383 @@ st.set_page_config(
 )
 
 MODEL_PATH = Path("fraud_model.pkl")
-DATA_PATH = Path("creditcard.csv")
+DATA_PATH = Path("creditcard_sample.csv")
 COMPARISON_PATH = Path("model_comparison.csv")
+
+# ---------------- LOGIN / REGISTER ----------------
+AUTH_DB = Path("users.db")
+PBKDF2_ITERATIONS = 310_000
+
+
+def init_auth_db():
+    conn = sqlite3.connect(str(AUTH_DB), timeout=10)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_bytes(16)
+
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PBKDF2_ITERATIONS
+    )
+    return salt.hex(), password_hash.hex()
+
+
+def verify_password(password, salt_hex, saved_hash):
+    try:
+        salt = bytes.fromhex(salt_hex)
+        _, calculated_hash = hash_password(password, salt)
+        return hmac.compare_digest(calculated_hash, saved_hash)
+    except (ValueError, TypeError):
+        return False
+
+
+def register_user(name, email, password):
+    salt, password_hash = hash_password(password)
+    conn = sqlite3.connect(str(AUTH_DB), timeout=10)
+
+    try:
+        conn.execute(
+            """INSERT INTO users
+               (name, email, salt, password_hash)
+               VALUES (?, ?, ?, ?)""",
+            (name, email, salt, password_hash)
+        )
+        conn.commit()
+        return True, "Registration successful! Please log in."
+    except sqlite3.IntegrityError:
+        return False, "This email is already registered."
+    finally:
+        conn.close()
+
+
+def authenticate_user(email, password):
+    conn = sqlite3.connect(str(AUTH_DB), timeout=10)
+
+    try:
+        user = conn.execute(
+            "SELECT name, email, salt, password_hash "
+            "FROM users WHERE email = ?",
+            (email,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if user and verify_password(password, user[2], user[3]):
+        return {"name": user[0], "email": user[1]}
+
+    return None
+
+
+def validate_password_strength(password):
+    errors = []
+    if len(password) < 8:
+        errors.append("Password must have at least 8 characters.")
+    if not re.search(r"[A-Z]", password):
+        errors.append("Add at least one uppercase letter (A-Z).")
+    if not re.search(r"[a-z]", password):
+        errors.append("Add at least one lowercase letter (a-z).")
+    if not re.search(r"\d", password):
+        errors.append("Add at least one number (0-9).")
+    if not re.search(r"[^A-Za-z0-9]", password):
+        errors.append("Add at least one special character, such as @ or #.")
+    return errors
+
+
+
+# ---------------- AUTHENTICATION GATE ----------------
+init_auth_db()
+
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+if st.session_state.auth_user is None:
+
+    # Professional login page styling
+    st.markdown("""
+        <style>
+        .stApp {
+            background:
+                radial-gradient(ellipse at 5% 5%, #172554 0%, transparent 42%),
+                radial-gradient(ellipse at 95% 95%, #172033 0%, transparent 42%),
+                #090d16;
+        }
+
+        .block-container {
+            max-width: 1200px;
+            padding-top: 3rem;
+            padding-bottom: 3rem;
+        }
+
+        .auth-subtitle {
+            color: #a5b4fc;
+            font-size: 16px;
+            line-height: 1.8;
+        }
+
+        .auth-feature {
+            background: rgba(30, 41, 59, 0.55);
+            border: 1px solid #303c53;
+            padding: 14px 16px;
+            border-radius: 12px;
+            margin: 10px 0;
+            color: #e2e8f0;
+        }
+
+        div[data-testid="stForm"] {
+            background: rgba(20, 27, 43, 0.88);
+            border: 1px solid #303c53;
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.25);
+        }
+
+        div[data-testid="stTextInput"] input {
+            background: #111827;
+            border: 1px solid #374151;
+            border-radius: 10px;
+            min-height: 44px;
+        }
+
+        div[data-testid="stTextInput"] input:focus {
+            border-color: #60a5fa;
+            box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.15);
+        }
+
+        div[data-testid="stFormSubmitButton"] button {
+            border-radius: 10px;
+            min-height: 46px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        div[data-testid="stFormSubmitButton"] button:hover {
+            filter: brightness(1.12);
+            transform: translateY(-1px);
+        }
+
+        div[role="radiogroup"] {
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid #303c53;
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        hr {
+            border-color: #303c53;
+            margin: 24px 0;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 10px;
+        }
+
+        @media (max-width: 768px) {
+            .block-container {
+                padding: 1rem;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    left, right = st.columns([1, 1.1], gap="large")
+
+    # LEFT: Product branding and features
+    with left:
+        st.markdown("# 💳 CardShield")
+        st.markdown("### Intelligent Fraud Protection")
+
+        st.markdown(
+            '<p class="auth-subtitle">'
+            'A smarter workspace for transaction risk analysis, '
+            'machine-learning insights and fraud monitoring.'
+            '</p>',
+            unsafe_allow_html=True,
+        )
+
+        st.divider()
+
+        st.markdown("#### ✨ Your security workspace")
+
+        st.markdown("""
+        <div class="auth-feature">
+            📊 <b>Fraud Intelligence</b><br>
+            Explore historical transaction patterns and trends.
+        </div>
+
+        <div class="auth-feature">
+            🤖 <b>Machine Learning</b><br>
+            Screen uploaded transactions with your trained model.
+        </div>
+
+        <div class="auth-feature">
+            📈 <b>Model Performance</b><br>
+            Review precision, recall and model comparisons.
+        </div>
+
+        <div class="auth-feature">
+            🔐 <b>Personal Workspace</b><br>
+            Register and access your own account.
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
+        st.caption(
+            "🛡️ Educational portfolio project. "
+            "Not connected to a bank or live payment network."
+        )
+
+    # RIGHT: Login and registration
+    with right:
+        st.markdown("## Welcome")
+        st.write("Sign in to continue or create your account.")
+
+        login_mode = st.radio(
+            "Choose account option",
+            ["Login", "Register"],
+            horizontal=True,
+            key="auth_mode",
+        )
+
+        if login_mode == "Register":
+            st.markdown("### Create your account")
+
+            show_register_password = st.checkbox(
+                "Show password",
+                key="show_register_password",
+            )
+
+            with st.form("register_form"):
+                name = st.text_input(
+                    "Full name",
+                    max_chars=100,
+                    placeholder="Enter your name",
+                )
+
+                email = st.text_input(
+                    "Email address",
+                    max_chars=254,
+                    placeholder="you@example.com",
+                )
+
+                password = st.text_input(
+                    "Create password",
+                    type="default" if show_register_password else "password",
+                    help=(
+                        "Use at least 8 characters, including uppercase, "
+                        "lowercase, a number and a special character."
+                    ),
+                )
+
+                confirm_password = st.text_input(
+                    "Confirm password",
+                    type="default" if show_register_password else "password",
+                )
+
+                register_clicked = st.form_submit_button(
+                    "✨ Create Account",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            st.caption(
+                "Use a strong password with uppercase, lowercase, "
+                "a number and a special character."
+            )
+
+            if register_clicked:
+                name = name.strip()
+                email = email.strip().lower()
+
+                if not name or not email or not password or not confirm_password:
+                    st.error("Please fill in all fields.")
+
+                elif not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                    st.error("Please enter a valid email address.")
+
+                elif password != confirm_password:
+                    st.error("Passwords do not match.")
+
+                else:
+                    password_errors = validate_password_strength(password)
+
+                    if password_errors:
+                        st.error("Please improve your password:")
+                        for error in password_errors:
+                            st.write(f"- {error}")
+
+                    else:
+                        success, message = register_user(
+                            name, email, password
+                        )
+
+                        if success:
+                            st.success(message)
+                            st.info(
+                                "Select Login above to sign in."
+                            )
+                        else:
+                            st.error(message)
+
+        else:
+            st.markdown("### Login to your account")
+
+            show_login_password = st.checkbox(
+                "Show password",
+                key="show_login_password",
+            )
+
+            with st.form("login_form"):
+                email = st.text_input(
+                    "Email address",
+                    placeholder="you@example.com",
+                )
+
+                password = st.text_input(
+                    "Password",
+                    type="default" if show_login_password else "password",
+                )
+
+                login_clicked = st.form_submit_button(
+                    "🔐 Sign In",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            if login_clicked:
+                email = email.strip().lower()
+
+                user = authenticate_user(email, password)
+
+                if user:
+                    st.session_state.auth_user = user
+                    st.rerun()
+                else:
+                    st.error(
+                        "Incorrect email or password. "
+                        "Check your details or register first."
+                    )
+
+    # Stop dashboard rendering until the user logs in
+    st.stop()
 
 
 # ---------------- HELPERS ----------------
@@ -86,8 +466,8 @@ st.caption(
 )
 
 if not MODEL_PATH.exists():
-    st.error("Model file `fraud_model.pkl` was not found.")
-    st.info("Open the project folder in the terminal and run: `python train_model.py`")
+    st.error("Model file fraud_model.pkl was not found.")
+    st.info("Open the project folder in the terminal and run: python train_model.py")
     st.stop()
 
 try:
@@ -101,6 +481,15 @@ except Exception as exc:
 
 # ---------------- SIDEBAR ----------------
 st.sidebar.title("CardShield")
+
+if st.session_state.auth_user:
+    st.sidebar.success(f"Welcome, {st.session_state.auth_user['name']}!")
+    st.sidebar.caption(st.session_state.auth_user["email"])
+
+    if st.sidebar.button("Logout", use_container_width=True):
+        st.session_state.auth_user = None
+        st.rerun()
+
 page = st.sidebar.radio(
     "Workspace",
     [
@@ -139,317 +528,1552 @@ if DATA_PATH.exists():
         dataset_error = str(exc)
 
 # ---------------- EXECUTIVE OVERVIEW ----------------
+
+# ---------------- EXECUTIVE OVERVIEW ----------------
 if page == "Executive Overview":
-    st.subheader("Executive Overview")
+    st.markdown("""
+        <style>
+        .hero-card {
+            padding: 22px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #172554, #102a43);
+            border: 1px solid #25476a;
+            margin-bottom: 22px;
+        }
+        .hero-card h2 {
+            color: #f8fafc;
+            margin: 0;
+        }
+        .hero-card p {
+            color: #cbd5e1;
+            margin-bottom: 0;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+        <div class="hero-card">
+            <h2>🛡️ CardShield Command Center</h2>
+            <p>Fraud intelligence · Transaction monitoring · ML-powered risk analysis</p>
+        </div>
+    """, unsafe_allow_html=True)
+
     if df is None:
-        st.warning("Historical dataset `creditcard.csv` is unavailable or could not be read.")
+        st.error("Historical dataset creditcard.csv is unavailable.")
         if dataset_error:
             st.caption(dataset_error)
-        st.write("You can still use **Screen Transactions** to upload a compatible CSV.")
         st.stop()
 
-    if "Class" not in df.columns:
-        st.error("The historical dataset must contain a `Class` label (0 = normal, 1 = fraud).")
+    if not {"Class", "Amount"}.issubset(df.columns):
+        st.error("Dataset must contain Class and Amount columns.")
         st.stop()
 
-    total = len(df)
-    fraud_count = int((df["Class"] == 1).sum())
-    normal_count = int((df["Class"] == 0).sum())
-    fraud_rate = fraud_count / total * 100 if total else 0
-    amount_total = pd.to_numeric(df.get("Amount", pd.Series(dtype=float)), errors="coerce").sum()
+    # Prepare a safe analytics copy
+    overview = df.copy()
+    overview["Class"] = pd.to_numeric(
+        overview["Class"], errors="coerce"
+    )
+    overview["Amount"] = pd.to_numeric(
+        overview["Amount"], errors="coerce"
+    )
+    overview = overview.replace([np.inf, -np.inf], np.nan)
+    overview = overview.dropna(subset=["Class", "Amount"])
+    overview = overview[overview["Class"].isin([0, 1])].copy()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Historical transactions", f"{total:,}")
-    c2.metric("Fraud-labelled rows", f"{fraud_count:,}")
-    c3.metric("Normal-labelled rows", f"{normal_count:,}")
-    c4.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
+    if overview.empty:
+        st.warning("No valid transactions available.")
+        st.stop()
 
-    st.caption(f"Total recorded transaction amount: {amount_total:,.2f} (dataset currency not verified).")
+    # Interactive filters
+    st.subheader("🔎 Analytics Filters")
+
+    filter_col1, filter_col2 = st.columns([2, 1])
+
+    amount_min = float(overview["Amount"].min())
+    amount_max = float(overview["Amount"].max())
+
+    with filter_col1:
+        if amount_min < amount_max:
+            selected_amount = st.slider(
+                "Transaction amount",
+                min_value=amount_min,
+                max_value=amount_max,
+                value=(amount_min, amount_max),
+                key="overview_amount_filter",
+            )
+            filtered = overview[
+                overview["Amount"].between(
+                    selected_amount[0], selected_amount[1]
+                )
+            ].copy()
+        else:
+            filtered = overview.copy()
+
+    with filter_col2:
+        label_filter = st.selectbox(
+            "Transaction label",
+            ["All", "Normal", "Fraud"],
+            key="overview_label_filter",
+        )
+
+    if label_filter == "Normal":
+        filtered = filtered[filtered["Class"] == 0]
+    elif label_filter == "Fraud":
+        filtered = filtered[filtered["Class"] == 1]
+
+    if filtered.empty:
+        st.warning("No transactions match the selected filters.")
+        st.stop()
+
+    # KPI calculations
+    total = len(filtered)
+    fraud_count = int((filtered["Class"] == 1).sum())
+    normal_count = int((filtered["Class"] == 0).sum())
+    fraud_rate = fraud_count / total * 100
+    total_amount = float(filtered["Amount"].sum())
+    avg_amount = float(filtered["Amount"].mean())
+
+    st.subheader("📊 Key Risk Indicators")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Transactions", f"{total:,}")
+    k2.metric("Fraud-labelled", f"{fraud_count:,}")
+    k3.metric("Normal-labelled", f"{normal_count:,}")
+    k4.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
+
+    k5, k6 = st.columns(2)
+    k5.metric("Total transaction amount", f"{total_amount:,.2f}")
+    k6.metric("Average transaction amount", f"{avg_amount:,.2f}")
+
+    st.caption(
+        "Amounts are shown in dataset units; currency is unverified. "
+        "Fraud metrics describe existing dataset labels, not live predictions."
+    )
+
+    st.divider()
+
+    # Consistent dark chart theme
+    plt.style.use("dark_background")
 
     left, right = st.columns([1, 1])
-    with left:
-        st.markdown("#### Label distribution")
-        counts = df["Class"].map({0: "Normal", 1: "Fraud"}).fillna("Other").value_counts()
-        fig, ax = plt.subplots()
-        ax.bar(counts.index.astype(str), counts.values)
-        ax.set_ylabel("Rows")
-        ax.set_xlabel("Dataset label")
-        ax.set_title("Historical class distribution")
-        st.pyplot(fig)
-        plt.close(fig)
-    with right:
-        st.markdown("#### Dataset snapshot")
-        st.dataframe(df.head(8), use_container_width=True, hide_index=True)
 
-    st.info(
-        "These figures describe the CSV supplied with the project. They are not live bank statistics, "
-        "and a dataset label is not a prediction made by this dashboard."
+    # Donut chart
+    with left:
+        st.subheader("🍩 Transaction Distribution")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#0e1117")
+
+        values = [normal_count, fraud_count]
+        colors = ["#22d3ee", "#fb7185"]
+
+        if sum(values) > 0:
+            wedges, _, _ = ax.pie(
+                values,
+                colors=colors,
+                startangle=90,
+                autopct=lambda p: f"{p:.2f}%" if p >= 0.1 else "",
+                pctdistance=0.78,
+                wedgeprops={
+                    "width": 0.40,
+                    "edgecolor": "#0e1117",
+                },
+                textprops={"color": "white"},
+            )
+
+            ax.text(
+                0, 0,
+                f"{total:,}\nRows",
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=15,
+                fontweight="bold",
+            )
+
+            ax.legend(
+                wedges,
+                [
+                    f"Normal: {normal_count:,}",
+                    f"Fraud: {fraud_count:,}",
+                ],
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.12),
+                ncol=2,
+                frameon=False,
+            )
+
+        ax.set_title("Labelled Transaction Mix")
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    # Transaction amount chart
+    with right:
+        st.subheader("💳 Transaction Amount Analysis")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#0e1117")
+
+        for label, color, name in [
+            (0, "#22d3ee", "Normal"),
+            (1, "#fb7185", "Fraud"),
+        ]:
+            values = filtered.loc[
+                filtered["Class"] == label, "Amount"
+            ]
+
+            if not values.empty:
+                sns.histplot(
+                    values,
+                    bins=30,
+                    element="step",
+                    stat="count",
+                    color=color,
+                    alpha=0.45,
+                    label=name,
+                    ax=ax,
+                )
+
+        ax.set_xlabel("Transaction amount")
+        ax.set_ylabel("Number of rows")
+        ax.set_title("Amount Distribution")
+        ax.legend()
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    st.divider()
+
+    # Time trend
+    if "Time" in filtered.columns:
+        st.subheader("📈 Transaction Activity Over Time")
+
+        time_data = filtered[["Time", "Class"]].copy()
+        time_data["Time"] = pd.to_numeric(
+            time_data["Time"], errors="coerce"
+        )
+        time_data = time_data.dropna(subset=["Time"])
+
+        if not time_data.empty:
+            time_data["Time interval"] = (
+                time_data["Time"] // 3600
+            ).astype(int)
+
+            trend = time_data.groupby("Time interval").agg(
+                Transactions=("Class", "size"),
+                Fraud=("Class", "sum"),
+            )
+
+            st.line_chart(
+                trend,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "Time intervals represent elapsed hours derived from "
+                "the dataset's Time column, not actual calendar hours."
+            )
+
+    # Preview and export
+    st.divider()
+    st.subheader("📋 Filtered Transaction Preview")
+
+    preview_cols = [
+        c for c in ["Time", "Amount", "Class"]
+        if c in filtered.columns
+    ]
+    st.dataframe(
+        filtered[preview_cols].head(100),
+        use_container_width=True,
+        hide_index=True,
     )
+
+    st.download_button(
+        "⬇️ Export Filtered Dataset",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="cardshield_overview_report.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "CardShield | Machine-learning fraud monitoring portfolio project"
+    )
+
+
+
+
+# ---------------- FRAUD ANALYTICS ----------------
 
 # ---------------- FRAUD ANALYTICS ----------------
 elif page == "Fraud Analytics":
-    st.subheader("Fraud Analytics")
+    st.title("📊 CardShield | Advanced Fraud Analytics")
+    st.caption(
+        "Historical transaction intelligence • Fraud patterns • Risk monitoring"
+    )
+
     if df is None:
-        st.error("Put `creditcard.csv` in the project folder to use historical analytics.")
+        st.error("creditcard.csv could not be loaded.")
         if dataset_error:
             st.caption(dataset_error)
         st.stop()
-    required = {"Class", "Amount"}
-    if not required.issubset(df.columns):
-        st.error("Historical analytics require `Class` and `Amount` columns.")
+
+    if not {"Class", "Amount"}.issubset(df.columns):
+        st.error("Dataset must contain Class and Amount columns.")
         st.stop()
 
     analytics = df.copy()
-    analytics["Amount"] = pd.to_numeric(analytics["Amount"], errors="coerce")
-    analytics = analytics.dropna(subset=["Amount", "Class"])
-
-    fraud = analytics[analytics["Class"] == 1]
-    normal = analytics[analytics["Class"] == 0]
-    a, b, c = st.columns(3)
-    a.metric("Fraud-labelled amount", f"{fraud['Amount'].sum():,.2f}")
-    b.metric("Average fraud amount", f"{fraud['Amount'].mean():,.2f}" if len(fraud) else "N/A")
-    c.metric("Median normal amount", f"{normal['Amount'].median():,.2f}" if len(normal) else "N/A")
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Normal vs fraud-labelled rows")
-        counts = analytics["Class"].value_counts().reindex([0, 1], fill_value=0)
-        fig, ax = plt.subplots()
-        ax.bar(["Normal (0)", "Fraud (1)"], counts.values)
-        ax.set_ylabel("Transactions")
-        ax.set_title("Class distribution")
-        st.pyplot(fig)
-        plt.close(fig)
-    with right:
-        st.markdown("#### Amount distribution")
-        fig, ax = plt.subplots()
-        sns.histplot(
-            data=analytics,
-            x="Amount",
-            hue="Class",
-            bins=40,
-            element="step",
-            stat="count",
-            common_norm=False,
-            ax=ax,
-        )
-        ax.set_title("Transaction amount by dataset label")
-        st.pyplot(fig)
-        plt.close(fig)
-
-    if "Time" in analytics.columns:
-        st.markdown("#### Fraud-labelled transactions over time")
-        analytics["Time"] = pd.to_numeric(analytics["Time"], errors="coerce")
-        analytics["Time bucket"] = (analytics["Time"] // 3600).astype("Int64")
-        hourly = analytics[analytics["Class"] == 1].groupby("Time bucket").size()
-        if not hourly.empty:
-            st.line_chart(hourly.rename("Fraud-labelled rows"))
-        else:
-            st.caption("No fraud-labelled rows were available for the time chart.")
-
-    summary = analytics.groupby("Class")["Amount"].agg(
-        Transaction_Count="count",
-        Mean_Amount="mean",
-        Median_Amount="median",
-        Maximum_Amount="max",
-        Total_Amount="sum",
+    analytics["Class"] = pd.to_numeric(
+        analytics["Class"], errors="coerce"
     )
-    summary.index = [
-    {0: "Normal (0)", 1: "Fraud (1)"}.get(i, str(i))
-    for i in summary.index
-]
-    st.markdown("#### Summary by known label")
+    analytics["Amount"] = pd.to_numeric(
+        analytics["Amount"], errors="coerce"
+    )
+    analytics = analytics.replace([np.inf, -np.inf], np.nan)
+    analytics = analytics.dropna(subset=["Class", "Amount"])
+    analytics = analytics[analytics["Class"].isin([0, 1])].copy()
+
+    if analytics.empty:
+        st.warning("No valid transaction rows available.")
+        st.stop()
+
+    # Dashboard filters
+    st.subheader("🔎 Transaction Filters")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        min_amount = float(analytics["Amount"].min())
+        max_amount = float(analytics["Amount"].max())
+
+        if min_amount < max_amount:
+            amount_range = st.slider(
+                "Transaction amount range",
+                min_value=min_amount,
+                max_value=max_amount,
+                value=(min_amount, max_amount),
+                key="improved_amount_filter",
+            )
+            analytics = analytics[
+                analytics["Amount"].between(
+                    amount_range[0], amount_range[1]
+                )
+            ]
+
+    with col2:
+        time_col = (
+            "Time"
+            if "Time" in analytics.columns
+            else None
+        )
+
+        if time_col and not analytics.empty:
+            analytics["Time"] = pd.to_numeric(
+                analytics["Time"], errors="coerce"
+            )
+            analytics = analytics.dropna(subset=["Time"])
+
+            t_min = float(analytics["Time"].min())
+            t_max = float(analytics["Time"].max())
+
+            if t_min < t_max:
+                time_range = st.slider(
+                    "Elapsed time range (seconds)",
+                    min_value=t_min,
+                    max_value=t_max,
+                    value=(t_min, t_max),
+                    key="improved_time_filter",
+                )
+                analytics = analytics[
+                    analytics["Time"].between(
+                        time_range[0], time_range[1]
+                    )
+                ]
+
+    if analytics.empty:
+        st.warning("No transactions match these filters.")
+        st.stop()
+
+    # KPI calculations from the selected dataset
+    total = len(analytics)
+    fraud = analytics[analytics["Class"] == 1]
+    genuine = analytics[analytics["Class"] == 0]
+
+    fraud_count = len(fraud)
+    genuine_count = len(genuine)
+    fraud_rate = fraud_count / total * 100 if total else 0
+    fraud_amount = float(fraud["Amount"].sum())
+    average_amount = float(analytics["Amount"].mean())
+
+    st.subheader("📌 Key Performance Indicators")
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Transactions", f"{total:,}")
+    c2.metric("Fraud-labelled rows", f"{fraud_count:,}")
+    c3.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
+    c4.metric("Fraud amount total", f"{fraud_amount:,.2f}")
+
+    c1, c2 = st.columns(2)
+    c1.metric("Genuine-labelled rows", f"{genuine_count:,}")
+    c2.metric("Average transaction amount", f"{average_amount:,.2f}")
+
+    st.info(
+        "Charts below use the dataset's existing Class labels: "
+        "0 = genuine-labelled and 1 = fraud-labelled. "
+        "These are historical labels, not new model predictions. "
+        "Currency is not verified."
+    )
+
+    st.divider()
+
+    # Chart 1: Transaction counts
+    st.subheader("📊 Genuine vs Fraud Transactions")
+    left, right = st.columns(2)
+
+    with left:
+        count_data = pd.DataFrame({
+            "Transaction type": ["Genuine", "Fraud"],
+            "Transactions": [genuine_count, fraud_count],
+        })
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bars = ax.bar(
+            count_data["Transaction type"],
+            count_data["Transactions"],
+        )
+        ax.set_title("Transaction Count by Label")
+        ax.set_ylabel("Number of transactions")
+        ax.bar_label(bars, fmt="%,.0f")
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    # Chart 2: Total amount
+    with right:
+        amount_data = pd.DataFrame({
+            "Transaction type": ["Genuine", "Fraud"],
+            "Total amount": [
+                float(genuine["Amount"].sum()),
+                fraud_amount,
+            ],
+        })
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bars = ax.bar(
+            amount_data["Transaction type"],
+            amount_data["Total amount"],
+        )
+        ax.set_title("Total Amount by Label")
+        ax.set_ylabel("Amount (currency unverified)")
+        ax.bar_label(bars, fmt="%.2f")
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    st.divider()
+
+    # Chart 3: Amount distribution
+    st.subheader("💳 Transaction Amount Distribution")
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    sns.histplot(
+        data=analytics,
+        x="Amount",
+        hue="Class",
+        bins=40,
+        element="step",
+        stat="count",
+        common_norm=False,
+        ax=ax,
+    )
+    ax.set_title("Amount Distribution: Class 0 vs Class 1")
+    ax.set_xlabel("Transaction amount")
+    ax.set_ylabel("Transaction count")
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Chart 4: Fraud trend over elapsed time
+    if "Time" in analytics.columns:
+        st.subheader("⏱️ Fraud Trend Over Time")
+
+        trend = analytics.copy()
+        trend["Time Bucket (hour)"] = (
+            trend["Time"] // 3600
+        ).astype(int)
+
+        trend_summary = trend.groupby(
+            "Time Bucket (hour)"
+        ).agg(
+            Transactions=("Class", "size"),
+            Fraud=("Class", "sum"),
+        )
+
+        st.line_chart(trend_summary, use_container_width=True)
+
+        st.caption(
+            "Time represents elapsed seconds in this dataset, "
+            "not real calendar dates."
+        )
+
+    # Chart 5: Fraud amount distribution
+    st.subheader("📈 Fraud Amount Statistics")
+
+    if not fraud.empty:
+        stats = fraud["Amount"].describe().to_frame(
+            name="Fraud-labelled transactions"
+        )
+        st.dataframe(stats.round(2), use_container_width=True)
+    else:
+        st.info("No fraud-labelled transactions match the current filters.")
+
+    # Download filtered dataset
+    st.divider()
+    st.subheader("⬇️ Export Analytics")
+
+    csv_data = analytics.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "Download filtered analytics CSV",
+        data=csv_data,
+        file_name="cardshield_filtered_analytics.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "CardShield educational portfolio prototype • "
+        "Not connected to live bank systems."
+    )
+
+    # Fraud vs genuine charts
+   
+    # ---------- NEW: FRAUD VS NORMAL DONUT + TIME TREND ----------
+    st.subheader("📊 Fraud Detection Analytics")
+
+    chart_left, chart_right = st.columns([1, 1.4])
+
+    # 1. Donut chart
+    with chart_left:
+        st.markdown("#### 🍩 Fraud vs Normal Transactions")
+
+        labels = ["Normal", "Fraud"]
+        values = [genuine_count, fraud_count]
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        if sum(values) > 0:
+            wedges, _, _ = ax.pie(
+                values,
+                startangle=90,
+                colors=["#12C2E9", "#FF4B6E"],
+                autopct=lambda p: f"{p:.2f}%" if p >= 0.1 else "",
+                pctdistance=0.78,
+                wedgeprops={
+                    "width": 0.42,
+                    "edgecolor": "#0e1117"
+                },
+                textprops={"color": "white"}
+            )
+            total_transactions = sum(values)
+
+            ax.text(
+                0, 0,
+                f"{total_transactions:,}\nTotal",
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=15,
+                fontweight="bold"
+            )
+            ax.legend(
+                wedges,
+                [
+                    f"Normal: {genuine_count:,}",
+                    f"Fraud: {fraud_count:,}"
+                ],
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.12),
+                ncol=2,
+                frameon=False
+            )
+            ax.set_title("Transaction Distribution", color="white")
+            fig.patch.set_facecolor("#0e1117")
+            ax.set_facecolor("#0e1117")
+            st.pyplot(fig, use_container_width=True)
+
+        else:
+            st.info("No transactions available for this chart.")
+
+        plt.close(fig)
+
+    # 2. Fraud detection over elapsed time
+    with chart_right:
+        st.markdown("#### 📈 Fraud Detection Over Time")
+
+        if "Time" in analytics.columns:
+            time_data = analytics[["Time", "Class"]].copy()
+            time_data["Time"] = pd.to_numeric(
+                time_data["Time"], errors="coerce"
+            )
+            time_data = time_data.dropna()
+
+            if time_data["Time"].nunique() > 1:
+                number_of_bins = min(
+                    60, time_data["Time"].nunique()
+                )
+
+                time_data["Time_Bin"] = pd.cut(
+                    time_data["Time"],
+                    bins=number_of_bins,
+                    duplicates="drop"
+                )
+
+                time_data["Elapsed Seconds"] = time_data[
+                    "Time_Bin"
+                ].map(lambda interval: interval.mid)
+
+                trend = time_data.groupby(
+                    "Time_Bin", observed=False
+                ).agg(
+                    Fraud=("Class", lambda x: (x == 1).sum()),
+                    Normal=("Class", lambda x: (x == 0).sum())
+                ).reset_index()
+
+                trend["Elapsed Seconds"] = trend[
+                    "Time_Bin"
+                ].map(lambda interval: interval.mid)
+
+                fig, ax = plt.subplots(figsize=(9, 4))
+
+                ax.plot(
+                    trend["Elapsed Seconds"],
+                    trend["Normal"],
+                    color="#12C2E9",
+                    linewidth=2,
+                    label="Normal"
+                )
+
+                ax.plot(
+                    trend["Elapsed Seconds"],
+                    trend["Fraud"],
+                    color="#FF4B6E",
+                    linewidth=2,
+                    label="Fraud"
+                )
+
+                ax.set_xlabel("Elapsed Time (seconds)")
+                ax.set_ylabel("Transactions per interval")
+                ax.set_title("Fraud and Normal Transaction Trend")
+                ax.legend()
+                ax.grid(alpha=0.2)
+
+                fig.patch.set_facecolor("#0e1117")
+                ax.set_facecolor("#0e1117")
+                ax.tick_params(colors="white")
+                ax.xaxis.label.set_color("white")
+                ax.yaxis.label.set_color("white")
+                ax.title.set_color("white")
+                ax.legend(
+                    facecolor="#20232b",
+                    labelcolor="white"
+                )
+
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+
+            else:
+                st.info(
+                    "Not enough different Time values to draw a trend."
+                )
+        elif "_date" in analytics.columns:
+            daily = analytics.copy()
+            daily["Date"] = daily["_date"].dt.floor("D")
+
+            trend = daily.groupby("Date").agg(
+                Fraud=("Class", lambda x: (x == 1).sum()),
+                Normal=("Class", lambda x: (x == 0).sum())
+            )
+
+            st.line_chart(trend)
+
+        else:
+            st.info(
+                "A Time or real transaction date column is required."
+            )
+
+    st.caption(
+        "Graphs use the filtered dataset and its existing Class labels. "
+        "Time in the original dataset means elapsed seconds, not calendar dates."
+    )
+
+    # ---------- TRANSACTION AMOUNT DISTRIBUTION ----------
+    st.subheader("💳 Transaction Amount Distribution")
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    sns.histplot(
+        data=analytics,
+        x="Amount",
+        hue="Class",
+        bins=40,
+        element="step",
+        stat="count",
+        common_norm=False,
+        ax=ax
+    )
+    ax.set_title("Amount Distribution: Normal vs Fraud")
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+    # Summary table
+    st.subheader("📋 Fraud Summary")
+    summary = analytics.groupby("Class").agg(
+        Transactions=("Amount", "size"),
+        Total_Amount=("Amount", "sum"),
+        Average_Amount=("Amount", "mean"),
+        Maximum_Amount=("Amount", "max"),
+    )
+    summary.index = summary.index.map({
+        0: "Genuine",
+        1: "Fraud",
+    })
     st.dataframe(summary.round(2), use_container_width=True)
+
+    # Download filtered rows
+    st.subheader("⬇️ Export Filtered Data")
+    st.download_button(
+        "Download Filtered Transactions CSV",
+        data=analytics.drop(
+            columns=["_date"], errors="ignore"
+        ).to_csv(index=False).encode("utf-8"),
+        file_name="filtered_fraud_analytics.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# ---------------- SCREEN TRANSACTIONS ----------------
 
 # ---------------- SCREEN TRANSACTIONS ----------------
 elif page == "Screen Transactions":
-    st.subheader("Screen Transactions")
-    st.write(
-        "Upload transaction rows as a CSV. The file must contain every feature used during model training "
-        "(typically `Time`, `V1`–`V28`, and `Amount`). Do not include personal card numbers or CVV data."
+    st.title("🔍 CardShield | Transaction Screening")
+    st.caption(
+        "AI-powered transaction screening, risk analysis and fraud alerts"
     )
-    uploaded = st.file_uploader("Choose transaction CSV", type=["csv"], key="screen_upload")
 
-    if uploaded is not None:
-        try:
-            incoming = pd.read_csv(uploaded)
-            st.write(f"**Rows received:** {len(incoming):,} · **Columns:** {len(incoming.columns):,}")
-            X_new, validation_error = validate_feature_frame(
-                incoming.drop(columns=["Class"], errors="ignore"), features
-            )
-            if validation_error:
-                st.error(validation_error)
-            else:
-                if not hasattr(model, "predict_proba"):
-                    st.error("The saved model does not support probability scores (`predict_proba`).")
-                    st.stop()
+    st.markdown("""
+    <style>
+    div[data-testid="stMetric"] {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,.25);
+        padding: 16px;
+        border-radius: 14px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-                scores = model.predict_proba(X_new)[:, 1]
-                predictions = (scores >= threshold).astype(int)
-                results = incoming.copy()
-                results["Fraud_Score"] = np.round(scores, 5)
-                results["Prediction"] = np.where(
-                    predictions == 1, "Flag for review", "No alert"
-                )
-                results["Risk_Band"] = add_risk_labels(scores, threshold)
-                results.insert(0, "Review_ID", [f"TXN-{i:06d}" for i in range(1, len(results) + 1)])
+    st.divider()
 
-                high = int((results["Risk_Band"] == "High review priority").sum())
-                flagged = int(predictions.sum())
-                normal_pred = int((predictions == 0).sum())
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Rows screened", f"{len(results):,}")
-                m2.metric("Flagged for review", f"{flagged:,}")
-                m3.metric("High review priority", f"{high:,}")
-                m4.metric("No alert", f"{normal_pred:,}")
+    # Upload section
+    st.subheader("📁 Upload Transaction Dataset")
+    st.write(
+        "Upload a CSV containing the features required by your trained model. "
+        "For the standard dataset, these are usually Time, V1–V28 and Amount."
+    )
 
-                st.warning(
-                    "A model alert is a triage signal, not proof of fraud. Review alerts with approved "
-                    "procedures before taking action against a cardholder."
-                )
+    uploaded = st.file_uploader(
+        "Choose your transaction CSV file",
+        type=["csv"],
+        key="interactive_screen_upload",
+        help="Do not upload real card numbers, CVV codes or passwords."
+    )
 
-                show_flagged_only = st.checkbox("Show flagged transactions only", value=False)
-                min_score = st.slider(
-                    "Minimum score to display",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.0,
-                    step=0.05,
-                )
-                visible = results[results["Fraud_Score"] >= min_score]
-                if show_flagged_only:
-                    visible = visible[visible["Prediction"] == "Flag for review"]
+    if uploaded is None:
+        st.info("👆 Upload a CSV file to start transaction screening.")
 
-                sort_options = ["Fraud_Score", "Risk_Band"]
-                sort_by = st.selectbox("Sort results by", sort_options, index=0)
-                visible = visible.sort_values(sort_by, ascending=False if sort_by == "Fraud_Score" else True)
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("### 📤 Upload")
+        c1.caption("Choose your transaction dataset.")
+        c2.markdown("### 🤖 Predict")
+        c2.caption("The trained ML model scores each row.")
+        c3.markdown("### 📊 Analyze")
+        c3.caption("Review risk alerts and export results.")
 
-                display_cols = ["Review_ID", "Fraud_Score", "Prediction", "Risk_Band"] + [
-                    col for col in incoming.columns if col not in ["Class"]
-                ]
-                display_cols = list(dict.fromkeys(col for col in display_cols if col in visible.columns))
-                st.dataframe(
-                    visible[display_cols].style.map(risk_color, subset=["Risk_Band"]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        st.warning(
+            "This is an educational prototype. It is not connected "
+            "to a live bank or payment network."
+        )
 
-                csv_bytes = results.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download all screening results",
-                    data=csv_bytes,
-                    file_name="fraud_screening_results.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+    else:
+        file_size_mb = uploaded.size / (1024 * 1024)
 
-                if "Class" in incoming.columns:
-                    actual = pd.to_numeric(incoming["Class"], errors="coerce")
-                    if actual.notna().all() and actual.isin([0, 1]).all():
-                        actual = actual.astype(int)
-                        st.markdown("#### Evaluation against supplied labels")
-                        p, r, f, acc = st.columns(4)
-                        p.metric("Precision", f"{precision_score(actual, predictions, zero_division=0):.3f}")
-                        r.metric("Recall", f"{recall_score(actual, predictions, zero_division=0):.3f}")
-                        f.metric("F1 score", f"{f1_score(actual, predictions, zero_division=0):.3f}")
-                        acc.metric("Accuracy", f"{accuracy_score(actual, predictions):.3f}")
-                        fig, ax = plt.subplots()
-                        sns.heatmap(
-                            confusion_matrix(actual, predictions, labels=[0, 1]),
-                            annot=True,
-                            fmt="d",
-                            cmap="Blues",
-                            xticklabels=["Normal", "Fraud"],
-                            yticklabels=["Normal", "Fraud"],
-                            ax=ax,
+        c1, c2, c3 = st.columns(3)
+        c1.metric("📄 File name", uploaded.name)
+        c2.metric("💾 File size", f"{file_size_mb:.2f} MB")
+        c3.metric("📁 Format", "CSV")
+
+        if st.button(
+            "🚀 Analyze Transactions",
+            type="primary",
+            use_container_width=True,
+            key="run_transaction_screening"
+        ):
+            try:
+                with st.spinner("Reading and validating the dataset..."):
+                    uploaded.seek(0)
+                    incoming = pd.read_csv(uploaded)
+
+                if incoming.empty:
+                    st.error("The uploaded CSV contains no transaction rows.")
+
+                elif len(incoming) > 1_000_000:
+                    st.error(
+                        "This demo limits each screening run to 1,000,000 rows. "
+                        "Split larger files into smaller CSV files."
+                    )
+
+                else:
+                    st.success("CSV loaded successfully.")
+
+                    st.markdown("#### 👀 Dataset Preview")
+                    st.write(
+                        f"**Rows:** {len(incoming):,} | "
+                        f"**Columns:** {len(incoming.columns):,}"
+                    )
+
+                    with st.expander("View first 10 rows"):
+                        st.dataframe(
+                            incoming.head(10),
+                            use_container_width=True,
+                            hide_index=True
                         )
-                        ax.set_xlabel("Predicted label")
-                        ax.set_ylabel("Actual label")
-                        ax.set_title("Confusion matrix")
-                        st.pyplot(fig)
+
+                    # Validate model features
+                    input_data = incoming.drop(
+                        columns=["Class"], errors="ignore"
+                    )
+
+                    X_new, validation_error = validate_feature_frame(
+                        input_data, features
+                    )
+
+                    if validation_error:
+                        st.error(validation_error)
+                        st.write("Required model features:")
+                        st.code(", ".join(features))
+
+                    elif not hasattr(model, "predict_proba"):
+                        st.error(
+                            "The saved model does not support predict_proba."
+                        )
+
+                    else:
+                        with st.spinner("Running machine-learning predictions..."):
+                            scores = model.predict_proba(X_new)[:, 1]
+                            predictions = (scores >= threshold).astype(int)
+
+                        # Build results
+                        results = incoming.copy()
+                        results.insert(
+                            0,
+                            "Review_ID",
+                            [
+                                f"CS-{i:07d}"
+                                for i in range(1, len(results) + 1)
+                            ]
+                        )
+                        results["Fraud_Score"] = np.round(scores, 5)
+                        results["Prediction"] = np.where(
+                            predictions == 1,
+                            "Flag for review",
+                            "No alert"
+                        )
+                        results["Risk_Band"] = add_risk_labels(
+                            scores, threshold
+                        )
+
+                        flagged = int(predictions.sum())
+                        no_alert = len(results) - flagged
+                        high_risk = int(
+                            (
+                                results["Risk_Band"]
+                                == "High review priority"
+                            ).sum()
+                        )
+
+                        st.divider()
+                        st.subheader("📌 Screening Summary")
+
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Total Screened", f"{len(results):,}")
+                        m2.metric("🚨 Flagged", f"{flagged:,}")
+                        m3.metric("✅ No Alert", f"{no_alert:,}")
+                        m4.metric("🔴 High Priority", f"{high_risk:,}")
+
+                        st.caption(
+                            f"Configured alert threshold: {threshold:.2f}. "
+                            "Fraud scores are model outputs, not necessarily "
+                            "calibrated real-world probabilities."
+                        )
+
+                        st.warning(
+                            "A model alert does not prove fraud. "
+                            "Review flagged transactions before taking action."
+                        )
+
+                        # Interactive filters
+                        st.divider()
+                        st.subheader("🎛️ Filter Results")
+
+                        f1, f2 = st.columns(2)
+
+                        with f1:
+                            status_filter = st.selectbox(
+                                "Transaction status",
+                                [
+                                    "All transactions",
+                                    "Flagged only",
+                                    "No alert only"
+                                ]
+                            )
+
+                        with f2:
+                            min_score = st.slider(
+                                "Minimum fraud score",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=0.0,
+                                step=0.05
+                            )
+
+                        visible = results[
+                            results["Fraud_Score"] >= min_score
+                        ].copy()
+
+                        if status_filter == "Flagged only":
+                            visible = visible[
+                                visible["Prediction"] == "Flag for review"
+                            ]
+                        elif status_filter == "No alert only":
+                            visible = visible[
+                                visible["Prediction"] == "No alert"
+                            ]
+
+                        visible = visible.sort_values(
+                            "Fraud_Score", ascending=False
+                        )
+
+                        st.write(f"**Matching transactions:** {len(visible):,}")
+
+                        st.dataframe(
+                            visible,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        # Score distribution chart
+                        st.divider()
+                        st.subheader("📊 Fraud Score Distribution")
+
+                        fig, ax = plt.subplots(figsize=(10, 4))
+                        ax.hist(
+                            scores,
+                            bins=30,
+                            edgecolor="black"
+                        )
+                        ax.axvline(
+                            threshold,
+                            linestyle="--",
+                            linewidth=2,
+                            label=f"Alert threshold: {threshold:.2f}"
+                        )
+                        ax.set_xlabel("Model score")
+                        ax.set_ylabel("Number of transactions")
+                        ax.set_title("Distribution of ML model scores")
+                        ax.legend()
+                        fig.tight_layout()
+                        st.pyplot(fig, use_container_width=True)
                         plt.close(fig)
-        except Exception as exc:
-            st.error(f"Could not read or screen this CSV: {exc}")
+
+                        # Risk breakdown
+                        st.subheader("🚦 Risk Band Breakdown")
+
+                        risk_order = [
+                            "High review priority",
+                            "Needs review",
+                            "Low model score"
+                        ]
+
+                        risk_counts = (
+                            results["Risk_Band"]
+                            .value_counts()
+                            .reindex(risk_order, fill_value=0)
+                        )
+
+                        st.bar_chart(risk_counts)
+
+                        # Export results
+                        st.divider()
+                        st.subheader("⬇️ Export Screening Results")
+
+                        st.download_button(
+                            "📥 Download All Results (CSV)",
+                            data=results.to_csv(
+                                index=False
+                            ).encode("utf-8"),
+                            file_name="cardshield_screening_results.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+
+                        # Evaluate only when valid labels are provided
+                        if "Class" in incoming.columns:
+                            actual = pd.to_numeric(
+                                incoming["Class"], errors="coerce"
+                            )
+
+                            if (
+                                actual.notna().all()
+                                and actual.isin([0, 1]).all()
+                            ):
+                                actual = actual.astype(int)
+
+                                st.divider()
+                                st.subheader(
+                                    "🧪 Evaluation Against Supplied Labels"
+                                )
+
+                                p, r, f, a = st.columns(4)
+                                p.metric(
+                                    "Precision",
+                                    f"{precision_score(actual, predictions, zero_division=0):.3f}"
+                                )
+                                r.metric(
+                                    "Recall",
+                                    f"{recall_score(actual, predictions, zero_division=0):.3f}"
+                                )
+                                f.metric(
+                                    "F1 Score",
+                                    f"{f1_score(actual, predictions, zero_division=0):.3f}"
+                                )
+                                a.metric(
+                                    "Accuracy",
+                                    f"{accuracy_score(actual, predictions):.3f}"
+                                )
+
+                                matrix = confusion_matrix(
+                                    actual, predictions, labels=[0, 1]
+                                )
+
+                                fig, ax = plt.subplots(figsize=(6, 4))
+                                sns.heatmap(
+                                    matrix,
+                                    annot=True,
+                                    fmt="d",
+                                    cmap="Blues",
+                                    xticklabels=["Normal", "Fraud"],
+                                    yticklabels=["Normal", "Fraud"],
+                                    ax=ax
+                                )
+                                ax.set_xlabel("Predicted label")
+                                ax.set_ylabel("Actual label")
+                                ax.set_title("Confusion Matrix")
+                                fig.tight_layout()
+                                st.pyplot(fig, use_container_width=True)
+                                plt.close(fig)
+
+            except Exception as exc:
+                st.error(f"Could not process the uploaded CSV: {exc}")
+
+    st.divider()
+    st.caption(
+        "CardShield | Educational fraud-monitoring prototype | "
+        "No live banking integration"
+    )
+
+
+# ---------------- MODEL EVALUATION ----------------
 
 # ---------------- MODEL EVALUATION ----------------
 elif page == "Model Evaluation":
-    st.subheader("Model Evaluation")
-    st.write("**Selected model:**", model_name)
 
-    ap = bundle.get("average_precision")
-    if ap is not None:
-        st.metric("Saved test-set Average Precision", f"{float(ap):.4f}")
-    else:
-        st.info("Average Precision was not saved in the model bundle.")
+    st.markdown("""
+        <style>
+        .model-heading {
+            font-size: 30px;
+            font-weight: 750;
+            color: #38bdf8;
+            margin-bottom: 4px;
+        }
+        .model-subtitle {
+            color: #94a3b8;
+            margin-bottom: 22px;
+        }
+        </style>
+        <div class="model-heading">📊 Model Performance Center</div>
+        <div class="model-subtitle">
+            Compare machine learning models and review fraud detection metrics.
+        </div>
+    """, unsafe_allow_html=True)
 
-    st.caption(
-        "Average Precision is useful for imbalanced fraud datasets, but it should be reviewed alongside "
-        "precision, recall, F1 score, false positives, false negatives, and operational cost."
-    )
+    st.caption(f"Active model: {model_name}")
+
+    # Load model comparison data
+    comparison = None
 
     if COMPARISON_PATH.exists():
         try:
             comparison = pd.read_csv(COMPARISON_PATH)
-            st.markdown("#### Model comparison")
-            st.dataframe(comparison, use_container_width=True, hide_index=True)
-            if {"Model", "Average Precision"}.issubset(comparison.columns):
-                plot_df = comparison[["Model", "Average Precision"]].copy()
-                plot_df["Average Precision"] = pd.to_numeric(
-                    plot_df["Average Precision"], errors="coerce"
-                )
-                plot_df = plot_df.dropna()
-                if not plot_df.empty:
-                    st.bar_chart(plot_df.set_index("Model"))
         except Exception as exc:
-            st.error(f"Could not read model comparison file: {exc}")
-    else:
-        st.info("Optional file `model_comparison.csv` not found. Run `python train_model.py` if your training script creates it.")
+            st.error(f"Could not load comparison data: {exc}")
 
-    st.markdown("#### What to validate before real deployment")
-    st.write(
-        "- Evaluate on a time-based, untouched test set.\n"
-        "- Check recall and precision at the chosen alert threshold.\n"
-        "- Review false positives and false negatives with a domain expert.\n"
-        "- Monitor data drift and model performance after deployment.\n"
-        "- Keep an audit trail and human review for consequential decisions."
-    )
+    required_cols = [
+        "Model", "Average Precision", "Precision", "Recall", "F1 Score"
+    ]
+
+    if comparison is not None and all(
+        col in comparison.columns for col in required_cols
+    ):
+        comparison = comparison.copy()
+
+        for col in required_cols[1:]:
+            comparison[col] = pd.to_numeric(
+                comparison[col], errors="coerce"
+            )
+
+        comparison = comparison.dropna(subset=required_cols[1:])
+
+        active_rows = comparison[
+            comparison["Model"].astype(str).str.casefold()
+            == str(model_name).casefold()
+        ]
+
+        if active_rows.empty:
+            active_rows = comparison.tail(1)
+
+        if not comparison.empty and not active_rows.empty:
+            active = active_rows.iloc[0]
+
+            # KPI cards
+            st.subheader("Key Performance Indicators")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Average Precision",
+                f"{active['Average Precision']:.4f}"
+            )
+            c2.metric(
+                "Precision",
+                f"{active['Precision']:.4f}"
+            )
+            c3.metric(
+                "Recall",
+                f"{active['Recall']:.4f}"
+            )
+            c4.metric(
+                "F1 Score",
+                f"{active['F1 Score']:.4f}"
+            )
+
+            st.caption(
+                "These metrics come from the saved model comparison results. "
+                "They describe the evaluation recorded during training."
+            )
+
+            st.divider()
+
+            # Model comparison table and chart
+            left, right = st.columns([1.25, 1])
+
+            with left:
+                st.subheader("Model Comparison")
+
+                styled = (
+                    comparison.style
+                    .format({
+                        "Average Precision": "{:.4f}",
+                        "Precision": "{:.4f}",
+                        "Recall": "{:.4f}",
+                        "F1 Score": "{:.4f}",
+                    })
+                )
+
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with right:
+                st.subheader("Average Precision")
+
+                chart_df = comparison[
+                    ["Model", "Average Precision"]
+                ].set_index("Model")
+
+                st.bar_chart(
+                    chart_df,
+                    y="Average Precision",
+                    color="#38bdf8",
+                    height=300
+                )
+
+            st.divider()
+
+            # Compare all metrics
+            st.subheader("Performance Across Metrics")
+
+            metric_chart = comparison.set_index("Model")[
+                ["Precision", "Recall", "F1 Score"]
+            ]
+
+            st.bar_chart(
+                metric_chart,
+                height=350
+            )
+
+            # Active model insight
+            st.subheader("Model Insights")
+
+            st.markdown(
+                f"""
+                **Selected model:** {model_name}
+
+                - **Precision:** {active['Precision']:.4f}
+                - **Recall:** {active['Recall']:.4f}
+                - **F1 Score:** {active['F1 Score']:.4f}
+                - **Average Precision:** {active['Average Precision']:.4f}
+                """
+            )
+
+            st.info(
+                "Fraud detection uses imbalanced data. A high precision score "
+                "does not mean every fraud case is caught. Review recall, "
+                "false negatives, false positives and the chosen alert threshold."
+            )
+
+            # Export comparison
+            st.download_button(
+                "⬇️ Download Model Comparison CSV",
+                data=comparison.to_csv(index=False).encode("utf-8"),
+                file_name="cardshield_model_comparison.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        else:
+            st.warning("No valid model comparison rows are available.")
+
+    else:
+        st.warning(
+            "Model comparison data is missing or does not contain the expected columns. "
+            "Check model_comparison.csv or run your training script."
+        )
+
+        ap = bundle.get("average_precision")
+
+        if ap is not None:
+            st.metric(
+                "Saved Test-Set Average Precision",
+                f"{float(ap):.4f}"
+            )
+
+    st.divider()
+
+    st.subheader("Deployment Checklist")
+
+    st.markdown("""
+    - Evaluate on an untouched test dataset.
+    - Check precision and recall at different thresholds.
+    - Review false positives and false negatives.
+    - Monitor data quality and model drift.
+    - Require human review before consequential action.
+    """)
+
 
 # ---------------- DATA QUALITY ----------------
+
+
+# ---------------- DATA QUALITY CENTER ----------------
 elif page == "Data Quality":
-    st.subheader("Data Quality Checks")
+
+    st.markdown("""
+        <style>
+        .dq-title {
+            font-size: 30px;
+            font-weight: 800;
+            color: #38bdf8;
+            margin-bottom: 0;
+        }
+        .dq-subtitle {
+            color: #94a3b8;
+            margin-bottom: 20px;
+        }
+        </style>
+        <div class="dq-title">🛡️ Data Quality Center</div>
+        <div class="dq-subtitle">
+            Dataset health, validation and interactive profiling
+        </div>
+    """, unsafe_allow_html=True)
+
     if df is None:
-        st.error("Historical dataset `creditcard.csv` is unavailable.")
+        st.error("Historical dataset could not be loaded.")
         if dataset_error:
             st.caption(dataset_error)
         st.stop()
 
-    rows, cols = df.shape
-    missing_cells = int(df.isna().sum().sum())
-    duplicate_rows = int(df.duplicated().sum())
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", f"{rows:,}")
-    c2.metric("Columns", f"{cols:,}")
-    c3.metric("Duplicate rows", f"{duplicate_rows:,}")
+    # Keep the original dataframe unchanged.
+    quality_df = df.copy()
 
-    st.write(f"**Missing cells:** {missing_cells:,}")
-    missing_summary = df.isna().sum().rename("Missing values").to_frame()
-    st.markdown("#### Missing values by column")
-    st.dataframe(missing_summary[missing_summary["Missing values"] > 0], use_container_width=True)
+    rows, cols = quality_df.shape
+    missing_cells = int(quality_df.isna().sum().sum())
+    duplicate_rows = int(quality_df.duplicated().sum())
 
-    st.markdown("#### Column types and unique values")
-    profile = pd.DataFrame({
-        "Data type": df.dtypes.astype(str),
-        "Non-null values": df.notna().sum(),
-        "Unique values": df.nunique(dropna=True),
-    })
-    st.dataframe(profile, use_container_width=True)
+    total_cells = max(rows * cols, 1)
+    quality_score = max(
+        0.0,
+        100 * (1 - (missing_cells + duplicate_rows * cols) / total_cells)
+    )
 
-    if "Class" in df.columns:
-        invalid_labels = int((~df["Class"].isin([0, 1])).sum())
-        st.write(f"**Class labels outside 0/1:** {invalid_labels:,}")
+    # KPI cards
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("📁 Total Rows", f"{rows:,}")
+    c2.metric("📊 Total Columns", f"{cols:,}")
+    c3.metric("⚠️ Missing Cells", f"{missing_cells:,}")
+    c4.metric("🔁 Duplicate Rows", f"{duplicate_rows:,}")
+
+    st.progress(
+        min(quality_score / 100, 1.0),
+        text=f"Data Quality Indicator: {quality_score:.1f}%"
+    )
+
+    if missing_cells == 0 and duplicate_rows == 0:
+        st.success("Dataset check passed: no missing cells or exact duplicate rows.")
+    else:
+        st.warning(
+            "Potential data-quality issues found. Review the details below "
+            "before cleaning or training."
+        )
+
+    st.divider()
+
+    # Interactive sections
+    profile_tab, missing_tab, duplicate_tab, preview_tab = st.tabs([
+        "📊 Dataset Profile",
+        "⚠️ Missing Values",
+        "🔁 Duplicates",
+        "🔎 Data Preview"
+    ])
+
+    with profile_tab:
+        left, right = st.columns(2)
+
+        with left:
+            st.subheader("Column Data Types")
+
+            type_counts = (
+                quality_df.dtypes.astype(str)
+                .value_counts()
+                .rename_axis("Data Type")
+                .to_frame("Columns")
+            )
+
+            st.bar_chart(type_counts, height=300)
+
+        with right:
+            st.subheader("Class Balance")
+
+            if "Class" in quality_df.columns:
+                class_counts = (
+                    pd.to_numeric(
+                        quality_df["Class"], errors="coerce"
+                    )
+                    .map({0: "Normal (0)", 1: "Fraud (1)"})
+                    .fillna("Other / Invalid")
+                    .value_counts()
+                    .rename_axis("Transaction Label")
+                    .to_frame("Rows")
+                )
+
+                st.bar_chart(class_counts, height=300)
+
+                st.caption(
+                    "Class balance uses existing dataset labels, "
+                    "not new model predictions."
+                )
+            else:
+                st.info("No Class column found in this dataset.")
+
+        st.subheader("Column Statistics")
+
+        profile = pd.DataFrame({
+            "Data Type": quality_df.dtypes.astype(str),
+            "Non-null Values": quality_df.notna().sum(),
+            "Missing Values": quality_df.isna().sum(),
+            "Unique Values": quality_df.nunique(dropna=True),
+        })
+
+        type_filter = st.selectbox(
+            "Filter columns by data type",
+            ["All"] + sorted(profile["Data Type"].unique().tolist()),
+            key="dq_type_filter"
+        )
+
+        if type_filter != "All":
+            profile = profile[profile["Data Type"] == type_filter]
+
+        st.dataframe(
+            profile,
+            use_container_width=True
+        )
+
+    with missing_tab:
+        st.subheader("Missing Values by Column")
+
+        missing_summary = (
+            quality_df.isna().sum()
+            .rename("Missing Values")
+            .to_frame()
+        )
+
+        missing_summary = missing_summary[
+            missing_summary["Missing Values"] > 0
+        ].sort_values("Missing Values", ascending=False)
+
+        if missing_summary.empty:
+            st.success("All columns are complete. No missing values found.")
+        else:
+            st.bar_chart(missing_summary, height=350)
+            st.dataframe(missing_summary, use_container_width=True)
+
+        st.caption(
+            "Blank values and non-numeric values in numeric columns "
+            "are different checks; validate feature values before prediction."
+        )
+
+    with duplicate_tab:
+        st.subheader("Duplicate Row Analysis")
+
+        st.metric("Exact duplicate rows", f"{duplicate_rows:,}")
+
+        if duplicate_rows:
+            st.warning(
+                "Review duplicates before removing them. Repeated transactions "
+                "may be legitimate."
+            )
+
+            if st.checkbox(
+                "Preview duplicate rows",
+                key="dq_show_duplicates"
+            ):
+                duplicates = quality_df[
+                    quality_df.duplicated(keep=False)
+                ]
+                st.dataframe(
+                    duplicates.head(500),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            if st.button(
+                "Prepare cleaned CSV without exact duplicates",
+                key="dq_prepare_clean"
+            ):
+                cleaned = quality_df.drop_duplicates().copy()
+                st.session_state["dq_clean_csv"] = (
+                    cleaned.to_csv(index=False).encode("utf-8")
+                )
+                st.session_state["dq_clean_rows"] = len(cleaned)
+
+            if "dq_clean_csv" in st.session_state:
+                st.caption(
+                    f"Prepared rows: {st.session_state['dq_clean_rows']:,}"
+                )
+                st.download_button(
+                    "Download cleaned CSV",
+                    data=st.session_state["dq_clean_csv"],
+                    file_name="cardshield_cleaned_dataset.csv",
+                    mime="text/csv",
+                    key="dq_download_clean"
+                )
+        else:
+            st.success("No exact duplicate rows found.")
+
+    with preview_tab:
+        st.subheader("Dataset Explorer")
+
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            preview_rows = st.selectbox(
+                "Rows to display",
+                [10, 25, 50, 100],
+                index=0,
+                key="dq_preview_rows"
+            )
+
+        with col2:
+            search_column = st.selectbox(
+                "Search in column",
+                ["All columns"] + quality_df.columns.tolist(),
+                key="dq_search_column"
+            )
+
+        search_text = st.text_input(
+            "🔍 Search dataset values",
+            placeholder="Enter a value or keyword...",
+            key="dq_search_text"
+        )
+
+        view_df = quality_df
+
+        if search_text.strip():
+            if search_column == "All columns":
+                mask = view_df.astype(str).apply(
+                    lambda col: col.str.contains(
+                        search_text.strip(),
+                        case=False,
+                        regex=False,
+                        na=False
+                    )
+                ).any(axis=1)
+            else:
+                mask = view_df[search_column].astype(str).str.contains(
+                    search_text.strip(),
+                    case=False,
+                    regex=False,
+                    na=False
+                )
+
+            view_df = view_df[mask]
+
+        st.caption(
+            f"Showing {min(preview_rows, len(view_df)):,} of "
+            f"{len(view_df):,} matching rows"
+        )
+
+        st.dataframe(
+            view_df.head(preview_rows),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "⬇️ Download current dataset",
+            data=view_df.to_csv(index=False).encode("utf-8"),
+            file_name="cardshield_dataset_export.csv",
+            mime="text/csv",
+            key="dq_download_data"
+        )
+
+    st.divider()
     st.caption(
-        "Duplicate rows should be investigated before deleting them. In transaction data, duplicates may "
-        "be meaningful repeated events or accidental duplicate records."
+        "CardShield Data Quality Center • Local dataset only • "
+        "Cleaning downloads do not overwrite the original CSV."
     )
 
 # ---------------- FOOTER / STYLE ----------------

@@ -15,3 +15,15 @@ creditcard.csv
 # Editor and OS files
 .vscode/
 .DS_Store
+# Local databases
+users.db
+prediction_history.db
+*.db
+
+# Backup files
+app_backup.py
+api_backup.py
+fraud_model_backup.pkl
+
+# Virtual environment and generated files
+fraud_data.csv/
