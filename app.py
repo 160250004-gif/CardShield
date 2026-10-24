@@ -1326,12 +1326,14 @@ elif page == "Screen Transactions":
                     incoming = pd.read_csv(uploaded)
 
                 if incoming.empty:
-                    st.error("The uploaded CSV contains no transaction rows.")
+                    st.error(
+                        "The uploaded CSV contains no transaction rows."
+                    )
 
                 elif len(incoming) > 1_000_000:
                     st.error(
-                        "This demo limits each screening run to 1,000,000 rows. "
-                        "Split larger files into smaller CSV files."
+                        "This demo limits each screening run to "
+                        "1,000,000 rows. Split larger files into smaller CSV files."
                     )
 
                 else:
@@ -1370,9 +1372,13 @@ elif page == "Screen Transactions":
                         )
 
                     else:
-                        with st.spinner("Running machine-learning predictions..."):
+                        with st.spinner(
+                            "Running machine-learning predictions..."
+                        ):
                             scores = model.predict_proba(X_new)[:, 1]
-                            predictions = (scores >= threshold).astype(int)
+                            predictions = (
+                                scores >= threshold
+                            ).astype(int)
 
                         # Build results
                         results = incoming.copy()
@@ -1384,6 +1390,7 @@ elif page == "Screen Transactions":
                                 for i in range(1, len(results) + 1)
                             ]
                         )
+
                         results["Fraud_Score"] = np.round(scores, 5)
                         results["Prediction"] = np.where(
                             predictions == 1,
@@ -1403,11 +1410,14 @@ elif page == "Screen Transactions":
                             ).sum()
                         )
 
+                        # Screening summary
                         st.divider()
                         st.subheader("📌 Screening Summary")
 
                         m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Total Screened", f"{len(results):,}")
+                        m1.metric(
+                            "Total Screened", f"{len(results):,}"
+                        )
                         m2.metric("🚨 Flagged", f"{flagged:,}")
                         m3.metric("✅ No Alert", f"{no_alert:,}")
                         m4.metric("🔴 High Priority", f"{high_risk:,}")
@@ -1436,7 +1446,8 @@ elif page == "Screen Transactions":
                                     "All transactions",
                                     "Flagged only",
                                     "No alert only"
-                                ]
+                                ],
+                                key="screen_status_filter"
                             )
 
                         with f2:
@@ -1445,7 +1456,8 @@ elif page == "Screen Transactions":
                                 min_value=0.0,
                                 max_value=1.0,
                                 value=0.0,
-                                step=0.05
+                                step=0.05,
+                                key="screen_min_score"
                             )
 
                         visible = results[
@@ -1454,18 +1466,23 @@ elif page == "Screen Transactions":
 
                         if status_filter == "Flagged only":
                             visible = visible[
-                                visible["Prediction"] == "Flag for review"
+                                visible["Prediction"]
+                                == "Flag for review"
                             ]
+
                         elif status_filter == "No alert only":
                             visible = visible[
                                 visible["Prediction"] == "No alert"
                             ]
 
                         visible = visible.sort_values(
-                            "Fraud_Score", ascending=False
+                            "Fraud_Score",
+                            ascending=False
                         )
 
-                        st.write(f"**Matching transactions:** {len(visible):,}")
+                        st.write(
+                            f"**Matching transactions:** {len(visible):,}"
+                        )
 
                         st.dataframe(
                             visible,
@@ -1473,125 +1490,25 @@ elif page == "Screen Transactions":
                             hide_index=True
                         )
 
-                        # Score distribution chart
+                        # Download results
                         st.divider()
-                        st.subheader("📊 Fraud Score Distribution")
+                        st.subheader("📥 Export Screening Results")
 
-                        fig, ax = plt.subplots(figsize=(10, 4))
-                        ax.hist(
-                            scores,
-                            bins=30,
-                            edgecolor="black"
-                        )
-                        ax.axvline(
-                            threshold,
-                            linestyle="--",
-                            linewidth=2,
-                            label=f"Alert threshold: {threshold:.2f}"
-                        )
-                        ax.set_xlabel("Model score")
-                        ax.set_ylabel("Number of transactions")
-                        ax.set_title("Distribution of ML model scores")
-                        ax.legend()
-                        fig.tight_layout()
-                        st.pyplot(fig, use_container_width=True)
-                        plt.close(fig)
-
-                        # Risk breakdown
-                        st.subheader("🚦 Risk Band Breakdown")
-
-                        risk_order = [
-                            "High review priority",
-                            "Needs review",
-                            "Low model score"
-                        ]
-
-                        risk_counts = (
-                            results["Risk_Band"]
-                            .value_counts()
-                            .reindex(risk_order, fill_value=0)
-                        )
-
-                        st.bar_chart(risk_counts)
-
-                        # Export results
-                        st.divider()
-                        st.subheader("⬇️ Export Screening Results")
+                        csv_data = results.to_csv(index=False).encode("utf-8")
 
                         st.download_button(
-                            "📥 Download All Results (CSV)",
-                            data=results.to_csv(
-                                index=False
-                            ).encode("utf-8"),
+                            label="⬇️ Download All Results (CSV)",
+                            data=csv_data,
                             file_name="cardshield_screening_results.csv",
                             mime="text/csv",
-                            use_container_width=True
+                            use_container_width=True,
+                            key="download_screening_results"
                         )
 
-                        # Evaluate only when valid labels are provided
-                        if "Class" in incoming.columns:
-                            actual = pd.to_numeric(
-                                incoming["Class"], errors="coerce"
-                            )
+            except Exception as e:
+                st.error("Unable to analyze the uploaded file.")
+                st.exception(e)
 
-                            if (
-                                actual.notna().all()
-                                and actual.isin([0, 1]).all()
-                            ):
-                                actual = actual.astype(int)
-
-                                st.divider()
-                                st.subheader(
-                                    "🧪 Evaluation Against Supplied Labels"
-                                )
-
-                                p, r, f, a = st.columns(4)
-                                p.metric(
-                                    "Precision",
-                                    f"{precision_score(actual, predictions, zero_division=0):.3f}"
-                                )
-                                r.metric(
-                                    "Recall",
-                                    f"{recall_score(actual, predictions, zero_division=0):.3f}"
-                                )
-                                f.metric(
-                                    "F1 Score",
-                                    f"{f1_score(actual, predictions, zero_division=0):.3f}"
-                                )
-                                a.metric(
-                                    "Accuracy",
-                                    f"{accuracy_score(actual, predictions):.3f}"
-                                )
-
-                                matrix = confusion_matrix(
-                                    actual, predictions, labels=[0, 1]
-                                )
-
-                                fig, ax = plt.subplots(figsize=(6, 4))
-                                sns.heatmap(
-                                    matrix,
-                                    annot=True,
-                                    fmt="d",
-                                    cmap="Blues",
-                                    xticklabels=["Normal", "Fraud"],
-                                    yticklabels=["Normal", "Fraud"],
-                                    ax=ax
-                                )
-                                ax.set_xlabel("Predicted label")
-                                ax.set_ylabel("Actual label")
-                                ax.set_title("Confusion Matrix")
-                                fig.tight_layout()
-                                st.pyplot(fig, use_container_width=True)
-                                plt.close(fig)
-
-            except Exception as exc:
-                st.error(f"Could not process the uploaded CSV: {exc}")
-
-    st.divider()
-    st.caption(
-        "CardShield | Educational fraud-monitoring prototype | "
-        "No live banking integration"
-    )
 
 
 # ---------------- MODEL EVALUATION ----------------
