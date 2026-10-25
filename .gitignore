@@ -26,4 +26,4 @@ api_backup.py
 fraud_model_backup.pkl
 
 # Virtual environment and generated files
-fraud_data.csv/
+fraud_data.csv
