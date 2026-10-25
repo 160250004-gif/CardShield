@@ -528,14 +528,20 @@ st.sidebar.caption(
     "This is a demonstration tool. It is not connected to a bank, card network, or live transaction feed."
 )
 
-# Load the dataset when available.
+# Load the historical dataset when available.
 df = None
 dataset_error = None
+
 if DATA_PATH.exists():
     try:
         df = load_dataset(str(DATA_PATH), DATA_PATH.stat().st_mtime)
     except Exception as exc:
         dataset_error = str(exc)
+else:
+    dataset_error = (
+        f"Dataset not found at: {DATA_PATH}. "
+        "Upload a CSV from the Screen Transactions page."
+    )
 
 # ---------------- EXECUTIVE OVERVIEW ----------------
 
@@ -568,857 +574,7 @@ if page == "Executive Overview":
         </div>
     """, unsafe_allow_html=True)
 
-    if df is None:
-        st.error("Historical dataset creditcard.csv is unavailable.")
-        if dataset_error:
-            st.caption(dataset_error)
-        st.stop()
-
-    if not {"Class", "Amount"}.issubset(df.columns):
-        st.error("Dataset must contain Class and Amount columns.")
-        st.stop()
-
-    # Prepare a safe analytics copy
-    overview = df.copy()
-    overview["Class"] = pd.to_numeric(
-        overview["Class"], errors="coerce"
-    )
-    overview["Amount"] = pd.to_numeric(
-        overview["Amount"], errors="coerce"
-    )
-    overview = overview.replace([np.inf, -np.inf], np.nan)
-    overview = overview.dropna(subset=["Class", "Amount"])
-    overview = overview[overview["Class"].isin([0, 1])].copy()
-
-    if overview.empty:
-        st.warning("No valid transactions available.")
-        st.stop()
-
-    # Interactive filters
-    st.subheader("🔎 Analytics Filters")
-
-    filter_col1, filter_col2 = st.columns([2, 1])
-
-    amount_min = float(overview["Amount"].min())
-    amount_max = float(overview["Amount"].max())
-
-    with filter_col1:
-        if amount_min < amount_max:
-            selected_amount = st.slider(
-                "Transaction amount",
-                min_value=amount_min,
-                max_value=amount_max,
-                value=(amount_min, amount_max),
-                key="overview_amount_filter",
-            )
-            filtered = overview[
-                overview["Amount"].between(
-                    selected_amount[0], selected_amount[1]
-                )
-            ].copy()
-        else:
-            filtered = overview.copy()
-
-    with filter_col2:
-        label_filter = st.selectbox(
-            "Transaction label",
-            ["All", "Normal", "Fraud"],
-            key="overview_label_filter",
-        )
-
-    if label_filter == "Normal":
-        filtered = filtered[filtered["Class"] == 0]
-    elif label_filter == "Fraud":
-        filtered = filtered[filtered["Class"] == 1]
-
-    if filtered.empty:
-        st.warning("No transactions match the selected filters.")
-        st.stop()
-
-    # KPI calculations
-    total = len(filtered)
-    fraud_count = int((filtered["Class"] == 1).sum())
-    normal_count = int((filtered["Class"] == 0).sum())
-    fraud_rate = fraud_count / total * 100
-    total_amount = float(filtered["Amount"].sum())
-    avg_amount = float(filtered["Amount"].mean())
-
-    st.subheader("📊 Key Risk Indicators")
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Transactions", f"{total:,}")
-    k2.metric("Fraud-labelled", f"{fraud_count:,}")
-    k3.metric("Normal-labelled", f"{normal_count:,}")
-    k4.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
-
-    k5, k6 = st.columns(2)
-    k5.metric("Total transaction amount", f"{total_amount:,.2f}")
-    k6.metric("Average transaction amount", f"{avg_amount:,.2f}")
-
-    st.caption(
-        "Amounts are shown in dataset units; currency is unverified. "
-        "Fraud metrics describe existing dataset labels, not live predictions."
-    )
-
-    st.divider()
-
-    # Consistent dark chart theme
-    plt.style.use("dark_background")
-
-    left, right = st.columns([1, 1])
-
-    # Donut chart
-    with left:
-        st.subheader("🍩 Transaction Distribution")
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        fig.patch.set_facecolor("#0e1117")
-        ax.set_facecolor("#0e1117")
-
-        values = [normal_count, fraud_count]
-        colors = ["#22d3ee", "#fb7185"]
-
-        if sum(values) > 0:
-            wedges, _, _ = ax.pie(
-                values,
-                colors=colors,
-                startangle=90,
-                autopct=lambda p: f"{p:.2f}%" if p >= 0.1 else "",
-                pctdistance=0.78,
-                wedgeprops={
-                    "width": 0.40,
-                    "edgecolor": "#0e1117",
-                },
-                textprops={"color": "white"},
-            )
-
-            ax.text(
-                0, 0,
-                f"{total:,}\nRows",
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=15,
-                fontweight="bold",
-            )
-
-            ax.legend(
-                wedges,
-                [
-                    f"Normal: {normal_count:,}",
-                    f"Fraud: {fraud_count:,}",
-                ],
-                loc="lower center",
-                bbox_to_anchor=(0.5, -0.12),
-                ncol=2,
-                frameon=False,
-            )
-
-        ax.set_title("Labelled Transaction Mix")
-        fig.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-
-    # Transaction amount chart
-    with right:
-        st.subheader("💳 Transaction Amount Analysis")
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        fig.patch.set_facecolor("#0e1117")
-        ax.set_facecolor("#0e1117")
-
-        for label, color, name in [
-            (0, "#22d3ee", "Normal"),
-            (1, "#fb7185", "Fraud"),
-        ]:
-            values = filtered.loc[
-                filtered["Class"] == label, "Amount"
-            ]
-
-            if not values.empty:
-                sns.histplot(
-                    values,
-                    bins=30,
-                    element="step",
-                    stat="count",
-                    color=color,
-                    alpha=0.45,
-                    label=name,
-                    ax=ax,
-                )
-
-        ax.set_xlabel("Transaction amount")
-        ax.set_ylabel("Number of rows")
-        ax.set_title("Amount Distribution")
-        ax.legend()
-        fig.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-
-    st.divider()
-
-    # Time trend
-    if "Time" in filtered.columns:
-        st.subheader("📈 Transaction Activity Over Time")
-
-        time_data = filtered[["Time", "Class"]].copy()
-        time_data["Time"] = pd.to_numeric(
-            time_data["Time"], errors="coerce"
-        )
-        time_data = time_data.dropna(subset=["Time"])
-
-        if not time_data.empty:
-            time_data["Time interval"] = (
-                time_data["Time"] // 3600
-            ).astype(int)
-
-            trend = time_data.groupby("Time interval").agg(
-                Transactions=("Class", "size"),
-                Fraud=("Class", "sum"),
-            )
-
-            st.line_chart(
-                trend,
-                use_container_width=True,
-            )
-
-            st.caption(
-                "Time intervals represent elapsed hours derived from "
-                "the dataset's Time column, not actual calendar hours."
-            )
-
-    # Preview and export
-    st.divider()
-    st.subheader("📋 Filtered Transaction Preview")
-
-    preview_cols = [
-        c for c in ["Time", "Amount", "Class"]
-        if c in filtered.columns
-    ]
-    st.dataframe(
-        filtered[preview_cols].head(100),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.download_button(
-        "⬇️ Export Filtered Dataset",
-        data=filtered.to_csv(index=False).encode("utf-8"),
-        file_name="cardshield_overview_report.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    st.caption(
-        "CardShield | Machine-learning fraud monitoring portfolio project"
-    )
-
-
-
-
-# ---------------- FRAUD ANALYTICS ----------------
-
-# ---------------- FRAUD ANALYTICS ----------------
-elif page == "Fraud Analytics":
-    st.title("📊 CardShield | Advanced Fraud Analytics")
-    st.caption(
-        "Historical transaction intelligence • Fraud patterns • Risk monitoring"
-    )
-
-    if df is None:
-        st.error("creditcard.csv could not be loaded.")
-        if dataset_error:
-            st.caption(dataset_error)
-        st.stop()
-
-    if not {"Class", "Amount"}.issubset(df.columns):
-        st.error("Dataset must contain Class and Amount columns.")
-        st.stop()
-
-    analytics = df.copy()
-    analytics["Class"] = pd.to_numeric(
-        analytics["Class"], errors="coerce"
-    )
-    analytics["Amount"] = pd.to_numeric(
-        analytics["Amount"], errors="coerce"
-    )
-    analytics = analytics.replace([np.inf, -np.inf], np.nan)
-    analytics = analytics.dropna(subset=["Class", "Amount"])
-    analytics = analytics[analytics["Class"].isin([0, 1])].copy()
-
-    if analytics.empty:
-        st.warning("No valid transaction rows available.")
-        st.stop()
-
-    # Dashboard filters
-    st.subheader("🔎 Transaction Filters")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        min_amount = float(analytics["Amount"].min())
-        max_amount = float(analytics["Amount"].max())
-
-        if min_amount < max_amount:
-            amount_range = st.slider(
-                "Transaction amount range",
-                min_value=min_amount,
-                max_value=max_amount,
-                value=(min_amount, max_amount),
-                key="improved_amount_filter",
-            )
-            analytics = analytics[
-                analytics["Amount"].between(
-                    amount_range[0], amount_range[1]
-                )
-            ]
-
-    with col2:
-        time_col = (
-            "Time"
-            if "Time" in analytics.columns
-            else None
-        )
-
-        if time_col and not analytics.empty:
-            analytics["Time"] = pd.to_numeric(
-                analytics["Time"], errors="coerce"
-            )
-            analytics = analytics.dropna(subset=["Time"])
-
-            t_min = float(analytics["Time"].min())
-            t_max = float(analytics["Time"].max())
-
-            if t_min < t_max:
-                time_range = st.slider(
-                    "Elapsed time range (seconds)",
-                    min_value=t_min,
-                    max_value=t_max,
-                    value=(t_min, t_max),
-                    key="improved_time_filter",
-                )
-                analytics = analytics[
-                    analytics["Time"].between(
-                        time_range[0], time_range[1]
-                    )
-                ]
-
-    if analytics.empty:
-        st.warning("No transactions match these filters.")
-        st.stop()
-
-    # KPI calculations from the selected dataset
-    total = len(analytics)
-    fraud = analytics[analytics["Class"] == 1]
-    genuine = analytics[analytics["Class"] == 0]
-
-    fraud_count = len(fraud)
-    genuine_count = len(genuine)
-    fraud_rate = fraud_count / total * 100 if total else 0
-    fraud_amount = float(fraud["Amount"].sum())
-    average_amount = float(analytics["Amount"].mean())
-
-    st.subheader("📌 Key Performance Indicators")
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Transactions", f"{total:,}")
-    c2.metric("Fraud-labelled rows", f"{fraud_count:,}")
-    c3.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
-    c4.metric("Fraud amount total", f"{fraud_amount:,.2f}")
-
-    c1, c2 = st.columns(2)
-    c1.metric("Genuine-labelled rows", f"{genuine_count:,}")
-    c2.metric("Average transaction amount", f"{average_amount:,.2f}")
-
-    st.info(
-        "Charts below use the dataset's existing Class labels: "
-        "0 = genuine-labelled and 1 = fraud-labelled. "
-        "These are historical labels, not new model predictions. "
-        "Currency is not verified."
-    )
-
-    st.divider()
-
-    # Chart 1: Transaction counts
-    st.subheader("📊 Genuine vs Fraud Transactions")
-    left, right = st.columns(2)
-
-    with left:
-        count_data = pd.DataFrame({
-            "Transaction type": ["Genuine", "Fraud"],
-            "Transactions": [genuine_count, fraud_count],
-        })
-
-        fig, ax = plt.subplots(figsize=(7, 4))
-        bars = ax.bar(
-            count_data["Transaction type"],
-            count_data["Transactions"],
-        )
-        ax.set_title("Transaction Count by Label")
-        ax.set_ylabel("Number of transactions")
-        ax.bar_label(bars, fmt="%,.0f")
-        fig.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-
-    # Chart 2: Total amount
-    with right:
-        amount_data = pd.DataFrame({
-            "Transaction type": ["Genuine", "Fraud"],
-            "Total amount": [
-                float(genuine["Amount"].sum()),
-                fraud_amount,
-            ],
-        })
-
-        fig, ax = plt.subplots(figsize=(7, 4))
-        bars = ax.bar(
-            amount_data["Transaction type"],
-            amount_data["Total amount"],
-        )
-        ax.set_title("Total Amount by Label")
-        ax.set_ylabel("Amount (currency unverified)")
-        ax.bar_label(bars, fmt="%.2f")
-        fig.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-
-    st.divider()
-
-    # Chart 3: Amount distribution
-    st.subheader("💳 Transaction Amount Distribution")
-    fig, ax = plt.subplots(figsize=(10, 4))
-
-    sns.histplot(
-        data=analytics,
-        x="Amount",
-        hue="Class",
-        bins=40,
-        element="step",
-        stat="count",
-        common_norm=False,
-        ax=ax,
-    )
-    ax.set_title("Amount Distribution: Class 0 vs Class 1")
-    ax.set_xlabel("Transaction amount")
-    ax.set_ylabel("Transaction count")
-    fig.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-
-    # Chart 4: Fraud trend over elapsed time
-    if "Time" in analytics.columns:
-        st.subheader("⏱️ Fraud Trend Over Time")
-
-        trend = analytics.copy()
-        trend["Time Bucket (hour)"] = (
-            trend["Time"] // 3600
-        ).astype(int)
-
-        trend_summary = trend.groupby(
-            "Time Bucket (hour)"
-        ).agg(
-            Transactions=("Class", "size"),
-            Fraud=("Class", "sum"),
-        )
-
-        st.line_chart(trend_summary, use_container_width=True)
-
-        st.caption(
-            "Time represents elapsed seconds in this dataset, "
-            "not real calendar dates."
-        )
-
-    # Chart 5: Fraud amount distribution
-    st.subheader("📈 Fraud Amount Statistics")
-
-    if not fraud.empty:
-        stats = fraud["Amount"].describe().to_frame(
-            name="Fraud-labelled transactions"
-        )
-        st.dataframe(stats.round(2), use_container_width=True)
-    else:
-        st.info("No fraud-labelled transactions match the current filters.")
-
-    # Download filtered dataset
-    st.divider()
-    st.subheader("⬇️ Export Analytics")
-
-    csv_data = analytics.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Download filtered analytics CSV",
-        data=csv_data,
-        file_name="cardshield_filtered_analytics.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    st.caption(
-        "CardShield educational portfolio prototype • "
-        "Not connected to live bank systems."
-    )
-
-    # Fraud vs genuine charts
-   
-    # ---------- NEW: FRAUD VS NORMAL DONUT + TIME TREND ----------
-    st.subheader("📊 Fraud Detection Analytics")
-
-    chart_left, chart_right = st.columns([1, 1.4])
-
-    # 1. Donut chart
-    with chart_left:
-        st.markdown("#### 🍩 Fraud vs Normal Transactions")
-
-        labels = ["Normal", "Fraud"]
-        values = [genuine_count, fraud_count]
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        if sum(values) > 0:
-            wedges, _, _ = ax.pie(
-                values,
-                startangle=90,
-                colors=["#12C2E9", "#FF4B6E"],
-                autopct=lambda p: f"{p:.2f}%" if p >= 0.1 else "",
-                pctdistance=0.78,
-                wedgeprops={
-                    "width": 0.42,
-                    "edgecolor": "#0e1117"
-                },
-                textprops={"color": "white"}
-            )
-            total_transactions = sum(values)
-
-            ax.text(
-                0, 0,
-                f"{total_transactions:,}\nTotal",
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=15,
-                fontweight="bold"
-            )
-            ax.legend(
-                wedges,
-                [
-                    f"Normal: {genuine_count:,}",
-                    f"Fraud: {fraud_count:,}"
-                ],
-                loc="lower center",
-                bbox_to_anchor=(0.5, -0.12),
-                ncol=2,
-                frameon=False
-            )
-            ax.set_title("Transaction Distribution", color="white")
-            fig.patch.set_facecolor("#0e1117")
-            ax.set_facecolor("#0e1117")
-            st.pyplot(fig, use_container_width=True)
-
-        else:
-            st.info("No transactions available for this chart.")
-
-        plt.close(fig)
-
-    # 2. Fraud detection over elapsed time
-    with chart_right:
-        st.markdown("#### 📈 Fraud Detection Over Time")
-
-        if "Time" in analytics.columns:
-            time_data = analytics[["Time", "Class"]].copy()
-            time_data["Time"] = pd.to_numeric(
-                time_data["Time"], errors="coerce"
-            )
-            time_data = time_data.dropna()
-
-            if time_data["Time"].nunique() > 1:
-                number_of_bins = min(
-                    60, time_data["Time"].nunique()
-                )
-
-                time_data["Time_Bin"] = pd.cut(
-                    time_data["Time"],
-                    bins=number_of_bins,
-                    duplicates="drop"
-                )
-
-                time_data["Elapsed Seconds"] = time_data[
-                    "Time_Bin"
-                ].map(lambda interval: interval.mid)
-
-                trend = time_data.groupby(
-                    "Time_Bin", observed=False
-                ).agg(
-                    Fraud=("Class", lambda x: (x == 1).sum()),
-                    Normal=("Class", lambda x: (x == 0).sum())
-                ).reset_index()
-
-                trend["Elapsed Seconds"] = trend[
-                    "Time_Bin"
-                ].map(lambda interval: interval.mid)
-
-                fig, ax = plt.subplots(figsize=(9, 4))
-
-                ax.plot(
-                    trend["Elapsed Seconds"],
-                    trend["Normal"],
-                    color="#12C2E9",
-                    linewidth=2,
-                    label="Normal"
-                )
-
-                ax.plot(
-                    trend["Elapsed Seconds"],
-                    trend["Fraud"],
-                    color="#FF4B6E",
-                    linewidth=2,
-                    label="Fraud"
-                )
-
-                ax.set_xlabel("Elapsed Time (seconds)")
-                ax.set_ylabel("Transactions per interval")
-                ax.set_title("Fraud and Normal Transaction Trend")
-                ax.legend()
-                ax.grid(alpha=0.2)
-
-                fig.patch.set_facecolor("#0e1117")
-                ax.set_facecolor("#0e1117")
-                ax.tick_params(colors="white")
-                ax.xaxis.label.set_color("white")
-                ax.yaxis.label.set_color("white")
-                ax.title.set_color("white")
-                ax.legend(
-                    facecolor="#20232b",
-                    labelcolor="white"
-                )
-
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-
-            else:
-                st.info(
-                    "Not enough different Time values to draw a trend."
-                )
-        elif "_date" in analytics.columns:
-            daily = analytics.copy()
-            daily["Date"] = daily["_date"].dt.floor("D")
-
-            trend = daily.groupby("Date").agg(
-                Fraud=("Class", lambda x: (x == 1).sum()),
-                Normal=("Class", lambda x: (x == 0).sum())
-            )
-
-            st.line_chart(trend)
-
-        else:
-            st.info(
-                "A Time or real transaction date column is required."
-            )
-
-    st.caption(
-        "Graphs use the filtered dataset and its existing Class labels. "
-        "Time in the original dataset means elapsed seconds, not calendar dates."
-    )
-
-    # ---------- TRANSACTION AMOUNT DISTRIBUTION ----------
-    st.subheader("💳 Transaction Amount Distribution")
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    sns.histplot(
-        data=analytics,
-        x="Amount",
-        hue="Class",
-        bins=40,
-        element="step",
-        stat="count",
-        common_norm=False,
-        ax=ax
-    )
-    ax.set_title("Amount Distribution: Normal vs Fraud")
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-
-
-    # Summary table
-    st.subheader("📋 Fraud Summary")
-    summary = analytics.groupby("Class").agg(
-        Transactions=("Amount", "size"),
-        Total_Amount=("Amount", "sum"),
-        Average_Amount=("Amount", "mean"),
-        Maximum_Amount=("Amount", "max"),
-    )
-    summary.index = summary.index.map({
-        0: "Genuine",
-        1: "Fraud",
-    })
-    st.dataframe(summary.round(2), use_container_width=True)
-
-    # Download filtered rows
-    st.subheader("⬇️ Export Filtered Data")
-    st.download_button(
-        "Download Filtered Transactions CSV",
-        data=analytics.drop(
-            columns=["_date"], errors="ignore"
-        ).to_csv(index=False).encode("utf-8"),
-        file_name="filtered_fraud_analytics.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-# ---------------- LIVE MONITORING ----------------
-elif page == "Live Monitoring":
-
-    st.title("📡 CardShield | Live Transaction Monitoring")
-    st.caption("Monitor demo transactions stored in the local SQLite database.")
-
-    st.info(
-        "Demo mode: These are locally simulated transactions, "
-        "not real-time transactions from a bank."
-    )
-
-    if not LIVE_DB_PATH.exists():
-        st.warning("Live database not found.")
-        st.write(
-            "Run live_simulator.py in another terminal first, "
-            "then refresh this page."
-        )
-
-    else:
-        try:
-            with sqlite3.connect(str(LIVE_DB_PATH), timeout=10) as conn:
-                transactions = pd.read_sql_query(
-                    """
-                    SELECT
-                        transaction_id,
-                        transaction_time,
-                        amount,
-                        fraud_probability,
-                        prediction,
-                        risk_band,
-                        source
-                    FROM live_transactions
-                    ORDER BY transaction_time DESC
-                    """,
-                    conn,
-                )
-
-            if transactions.empty:
-                st.warning(
-                    "No transactions found. Start live_simulator.py "
-                    "and refresh this page."
-                )
-
-            else:
-                transactions["amount"] = pd.to_numeric(
-                    transactions["amount"], errors="coerce"
-                )
-
-                transactions["fraud_probability"] = pd.to_numeric(
-                    transactions["fraud_probability"], errors="coerce"
-                )
-
-                risk = (
-                    transactions["risk_band"]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .str.lower()
-                )
-
-                transactions["Displayed Risk"] = risk.map({
-                    "low": "Normal",
-                    "normal": "Normal",
-                    "medium": "Review",
-                    "review": "Review",
-                    "high": "High Risk",
-                    "high risk": "High Risk",
-                }).fillna("Other")
-
-                total = len(transactions)
-                normal = int(
-                    (transactions["Displayed Risk"] == "Normal").sum()
-                )
-                review = int(
-                    (transactions["Displayed Risk"] == "Review").sum()
-                )
-                high_risk = int(
-                    (transactions["Displayed Risk"] == "High Risk").sum()
-                )
-
-                st.subheader("📊 Monitoring Summary")
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Transactions", total)
-                c2.metric("Normal", normal)
-                c3.metric("Review", review)
-                c4.metric("High Risk", high_risk)
-
-                st.divider()
-
-                left, right = st.columns(2)
-
-                with left:
-                    st.subheader("Risk Distribution")
-                    risk_counts = (
-                        transactions["Displayed Risk"]
-                        .value_counts()
-                        .reindex(
-                            ["Normal", "Review", "High Risk", "Other"],
-                            fill_value=0,
-                        )
-                    )
-                    st.bar_chart(risk_counts)
-
-                with right:
-                    st.subheader("Transaction Amounts")
-                    amount_data = transactions[
-                        ["transaction_time", "amount"]
-                    ].dropna()
-
-                    st.line_chart(
-                        amount_data.set_index("transaction_time")
-                    )
-
-                st.divider()
-                st.subheader("🧾 Recent Transactions")
-
-                st.dataframe(
-                    transactions[
-                        [
-                            "transaction_id",
-                            "transaction_time",
-                            "amount",
-                            "fraud_probability",
-                            "prediction",
-                            "Displayed Risk",
-                            "source",
-                        ]
-                    ].head(100),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.download_button(
-                    "⬇️ Export Monitoring Data",
-                    data=transactions.to_csv(index=False).encode("utf-8"),
-                    file_name="cardshield_live_monitoring.csv",
-                    mime="text/csv",
-                )
-
-                if st.button("🔄 Refresh Monitoring Data"):
-                    st.rerun()
-
-                st.caption(
-                    "Risk categories come from the saved simulator results. "
-                    "A risk label alone does not confirm fraud."
-                )
-
-        except Exception as exc:
-            st.error("Could not load live monitoring data.")
-            st.code(str(exc))
-# ---------------- SCREEN TRANSACTIONS ----------------
-
-
-
-# ---------------- SCREEN TRANSACTIONS ----------------
+  # ---------------- SCREEN TRANSACTIONS ----------------
 elif page == "Screen Transactions":
     st.title("🔍 CardShield | Transaction Screening")
     st.caption(
@@ -1764,6 +920,2366 @@ elif page == "Screen Transactions":
 
         else:
             st.warning("No transactions were extracted from the selected files.")
+
+
+
+# ---------------- MODEL EVALUATION ----------------
+elif page == "Model Evaluation":
+
+    st.markdown("""
+        <style>
+        .model-heading {
+            font-size: 30px;
+            font-weight: 750;
+            color: #38bdf8;
+            margin-bottom: 4px;
+        }
+        .model-subtitle {
+            color: #94a3b8;
+            margin-bottom: 22px;
+        }
+        </style>
+        <div class="model-heading">📊 Model Performance Center</div>
+        <div class="model-subtitle">
+            Compare machine learning models and review fraud detection metrics.
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.caption(f"Active model: {model_name}")
+
+    # Load model comparison data
+    comparison = None
+
+    if COMPARISON_PATH.exists():
+        try:
+            comparison = pd.read_csv(COMPARISON_PATH)
+        except Exception as exc:
+            st.error(f"Could not load comparison data: {exc}")
+
+    required_cols = [
+        "Model", "Average Precision", "Precision", "Recall", "F1 Score"
+    ]
+
+    if comparison is not None and all(
+        col in comparison.columns for col in required_cols
+    ):
+        comparison = comparison.copy()
+
+        for col in required_cols[1:]:
+            comparison[col] = pd.to_numeric(
+                comparison[col], errors="coerce"
+            )
+
+        comparison = comparison.dropna(subset=required_cols[1:])
+
+        active_rows = comparison[
+            comparison["Model"].astype(str).str.casefold()
+            == str(model_name).casefold()
+        ]
+
+        if active_rows.empty:
+            active_rows = comparison.tail(1)
+
+        if not comparison.empty and not active_rows.empty:
+            active = active_rows.iloc[0]
+
+            # KPI cards
+            st.subheader("Key Performance Indicators")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Average Precision",
+                f"{active['Average Precision']:.4f}"
+            )
+            c2.metric(
+                "Precision",
+                f"{active['Precision']:.4f}"
+            )
+            c3.metric(
+                "Recall",
+                f"{active['Recall']:.4f}"
+            )
+            c4.metric(
+                "F1 Score",
+                f"{active['F1 Score']:.4f}"
+            )
+
+            st.caption(
+                "These metrics come from the saved model comparison results. "
+                "They describe the evaluation recorded during training."
+            )
+
+            st.divider()
+
+            # Model comparison table and chart
+            left, right = st.columns([1.25, 1])
+
+            with left:
+                st.subheader("Model Comparison")
+
+                styled = (
+                    comparison.style
+                    .format({
+                        "Average Precision": "{:.4f}",
+                        "Precision": "{:.4f}",
+                        "Recall": "{:.4f}",
+                        "F1 Score": "{:.4f}",
+                    })
+                )
+
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with right:
+                st.subheader("Average Precision")
+
+                chart_df = comparison[
+                    ["Model", "Average Precision"]
+                ].set_index("Model")
+
+                st.bar_chart(
+                    chart_df,
+                    y="Average Precision",
+                    color="#38bdf8",
+                    height=300
+                )
+
+            st.divider()
+
+            # Compare all metrics
+            st.subheader("Performance Across Metrics")
+
+            metric_chart = comparison.set_index("Model")[
+                ["Precision", "Recall", "F1 Score"]
+            ]
+
+            st.bar_chart(
+                metric_chart,
+                height=350
+            )
+
+            # Active model insight
+            st.subheader("Model Insights")
+
+            st.markdown(
+                f"""
+                **Selected model:** {model_name}
+
+                - **Precision:** {active['Precision']:.4f}
+                - **Recall:** {active['Recall']:.4f}
+                - **F1 Score:** {active['F1 Score']:.4f}
+                - **Average Precision:** {active['Average Precision']:.4f}
+                """
+            )
+
+            st.info(
+                "Fraud detection uses imbalanced data. A high precision score "
+                "does not mean every fraud case is caught. Review recall, "
+                "false negatives, false positives and the chosen alert threshold."
+            )
+
+            # Export comparison
+            st.download_button(
+                "⬇️ Download Model Comparison CSV",
+                data=comparison.to_csv(index=False).encode("utf-8"),
+                file_name="cardshield_model_comparison.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        else:
+            st.warning("No valid model comparison rows are available.")
+
+    else:
+        st.warning(
+            "Model comparison data is missing or does not contain the expected columns. "
+            "Check model_comparison.csv or run your training script."
+        )
+
+        ap = bundle.get("average_precision")
+
+        if ap is not None:
+            st.metric(
+                "Saved Test-Set Average Precision",
+                f"{float(ap):.4f}"
+            )
+
+    st.divider()
+
+    st.subheader("Deployment Checklist")
+
+    st.markdown("""
+    - Evaluate on an untouched test dataset.
+    - Check precision and recall at different thresholds.
+    - Review false positives and false negatives.
+    - Monitor data quality and model drift.
+    - Require human review before consequential action.
+    """)# ---------------- SCREEN TRANSACTIONS ----------------
+elif page == "Screen Transactions":
+    st.title("🔍 CardShield | Transaction Screening")
+    st.caption(
+        "Upload PhonePe PDF statements or CSV files for transaction analysis."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload PDF and CSV files",
+        type=["pdf", "csv"],
+        accept_multiple_files=True,
+        key="combined_transaction_upload"
+    )
+
+    if uploaded_files:
+        all_transactions = []
+
+        for uploaded_file in uploaded_files:
+            try:
+                if uploaded_file.name.lower().endswith(".csv"):
+                    df = pd.read_csv(uploaded_file)
+
+                    # Normalize common CSV column names
+                    rename_map = {}
+                    for col in df.columns:
+                        name = str(col).strip().lower()
+                        if name in ["date", "transaction date"]:
+                            rename_map[col] = "Date"
+                        elif name in ["description", "merchant", "details", "narration"]:
+                            rename_map[col] = "Description"
+                        elif name in ["type", "transaction type", "dr/cr"]:
+                            rename_map[col] = "Type"
+                        elif name in ["amount", "transaction amount"]:
+                            rename_map[col] = "Amount"
+
+                    df = df.rename(columns=rename_map)
+
+                    if "Amount" in df.columns:
+                        df["Amount"] = pd.to_numeric(
+                            df["Amount"].astype(str).str.replace(
+                                r"[₹,\s]", "", regex=True
+                            ),
+                            errors="coerce"
+                        )
+
+                    df["Source File"] = uploaded_file.name
+                    all_transactions.append(df)
+
+                elif uploaded_file.name.lower().endswith(".pdf"):
+                    import datetime
+
+                    records = []
+                    date_pattern = re.compile(
+                        r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+                        r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+                        r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+                        r"Dec(?:ember)?)\s+(\d{1,2}),\s*(\d{4})\s+(.*)$",
+                        re.IGNORECASE
+                    )
+                    amount_pattern = re.compile(
+                        r"\b(DEBIT|CREDIT)\s*₹\s*([\d,]+(?:\.\d{1,2})?)",
+                        re.IGNORECASE
+                    )
+
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        for page_no, page_obj in enumerate(pdf.pages, 1):
+                            text = page_obj.extract_text() or ""
+                            blocks = []
+                            current = []
+
+                            for line in text.splitlines():
+                                line = line.strip()
+                                if date_pattern.match(line):
+                                    if current:
+                                        blocks.append(current)
+                                    current = [line]
+                                elif current:
+                                    current.append(line)
+
+                            if current:
+                                blocks.append(current)
+
+                            for block in blocks:
+                                match = date_pattern.match(block[0])
+                                if not match:
+                                    continue
+
+                                month, day, year, remainder = match.groups()
+                                try:
+                                    date_value = datetime.datetime.strptime(
+                                        f"{month[:3].title()} {day}, {year}",
+                                        "%b %d, %Y"
+                                    ).date()
+                                except ValueError:
+                                    continue
+
+                                amount_match = amount_pattern.search(remainder)
+                                if not amount_match:
+                                    continue
+
+                                txn_type = amount_match.group(1).upper()
+                                amount = float(
+                                    amount_match.group(2).replace(",", "")
+                                )
+                                description = remainder[:amount_match.start()].strip()
+
+                                txn_time = ""
+                                transaction_id = ""
+                                utr = ""
+
+                                for detail in block[1:]:
+                                    time_match = re.match(
+                                        r"^\s*(\d{4})\s*(am|pm)\b",
+                                        detail,
+                                        re.IGNORECASE
+                                    )
+                                    if time_match:
+                                        digits, ampm = time_match.groups()
+                                        hour = int(digits[:2])
+                                        minute = int(digits[2:])
+                                        if hour <= 12 and minute < 60:
+                                            hour = hour % 12
+                                            if ampm.lower() == "pm":
+                                                hour += 12
+                                            txn_time = f"{hour:02d}:{minute:02d}"
+
+                                    tid = re.search(
+                                        r"Transaction ID\s+([A-Za-z0-9]+)",
+                                        detail, re.IGNORECASE
+                                    )
+                                    if tid:
+                                        transaction_id = tid.group(1)
+
+                                    utr_match = re.search(
+                                        r"UTR No\.?\s*([A-Za-z0-9]+)",
+                                        detail, re.IGNORECASE
+                                    )
+                                    if utr_match:
+                                        utr = utr_match.group(1)
+
+                                records.append({
+                                    "Date": pd.Timestamp(date_value),
+                                    "Time": txn_time,
+                                    "Description": description,
+                                    "Type": txn_type,
+                                    "Amount": amount,
+                                    "Transaction ID": transaction_id,
+                                    "UTR": utr,
+                                    "Source File": uploaded_file.name,
+                                    "Source Page": page_no
+                                })
+
+                    if records:
+                        all_transactions.append(pd.DataFrame(records))
+                        st.success(
+                            f"Extracted {len(records)} transactions from "
+                            f"{uploaded_file.name}"
+                        )
+                    else:
+                        st.warning(
+                            f"No transactions were recognized in "
+                            f"{uploaded_file.name}. The parser expects a "
+                            "text-based PhonePe PDF in a supported format."
+                        )
+
+            except Exception as exc:
+                st.error(f"Could not process {uploaded_file.name}: {exc}")
+
+        if all_transactions:
+            combined_df = pd.concat(
+                all_transactions, ignore_index=True, sort=False
+            )
+
+            if "Amount" not in combined_df.columns:
+                st.error("No Amount column found. Check the CSV column names.")
+                st.stop()
+
+            combined_df["Amount"] = pd.to_numeric(
+                combined_df["Amount"], errors="coerce"
+            )
+            combined_df = combined_df.dropna(subset=["Amount"]).copy()
+
+            if "Type" not in combined_df.columns:
+                combined_df["Type"] = "Unknown"
+
+            combined_df["Type"] = (
+                combined_df["Type"].astype(str).str.upper().str.strip()
+            )
+
+            if "Date" in combined_df.columns:
+                combined_df["Date"] = pd.to_datetime(
+                    combined_df["Date"], errors="coerce"
+                )
+
+            st.divider()
+            st.subheader("📊 Transaction Intelligence Dashboard")
+
+            # Filters
+            f1, f2 = st.columns(2)
+            with f1:
+                types = sorted(combined_df["Type"].dropna().unique().tolist())
+                selected_types = st.multiselect(
+                    "Transaction type",
+                    types,
+                    default=types
+                )
+            with f2:
+                max_amount = float(combined_df["Amount"].max())
+                min_amount = float(combined_df["Amount"].min())
+                amount_range = st.slider(
+                    "Amount range",
+                    min_value=min_amount,
+                    max_value=max_amount if max_amount > min_amount else min_amount + 1.0,
+                    value=(min_amount, max_amount)
+                )
+
+            filtered = combined_df[
+                combined_df["Type"].isin(selected_types)
+                & combined_df["Amount"].between(
+                    amount_range[0], amount_range[1]
+                )
+            ].copy()
+
+            debit_mask = filtered["Type"].str.contains(
+                "DEBIT|DR|WITHDRAW", regex=True, na=False
+            )
+            credit_mask = filtered["Type"].str.contains(
+                "CREDIT|CR|DEPOSIT", regex=True, na=False
+            )
+
+            total_debit = filtered.loc[debit_mask, "Amount"].sum()
+            total_credit = filtered.loc[credit_mask, "Amount"].sum()
+            avg_amount = filtered["Amount"].mean() if not filtered.empty else 0
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Transactions", f"{len(filtered):,}")
+            k2.metric("Total Debit", f"₹{total_debit:,.2f}")
+            k3.metric("Total Credit", f"₹{total_credit:,.2f}")
+            k4.metric("Average Amount", f"₹{avg_amount:,.2f}")
+
+            if filtered.empty:
+                st.warning("No transactions match the selected filters.")
+            else:
+                left, right = st.columns(2)
+
+                with left:
+                    st.markdown("#### Debit vs Credit")
+                    flow_df = pd.DataFrame({
+                        "Category": ["Debit", "Credit"],
+                        "Amount": [total_debit, total_credit]
+                    })
+                    fig = px.pie(
+                        flow_df,
+                        names="Category",
+                        values="Amount",
+                        hole=0.58,
+                        title="Money Flow Distribution"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with right:
+                    st.markdown("#### Transaction Amounts")
+                    fig = px.histogram(
+                        filtered,
+                        x="Amount",
+                        color="Type",
+                        nbins=25,
+                        title="Amount Distribution",
+                        marginal="box"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                if "Date" in filtered.columns and filtered["Date"].notna().any():
+                    daily = (
+                        filtered.dropna(subset=["Date"])
+                        .assign(Day=lambda x: x["Date"].dt.date)
+                        .groupby(["Day", "Type"], as_index=False)
+                        .agg(
+                            Transactions=("Amount", "size"),
+                            Total_Amount=("Amount", "sum")
+                        )
+                    )
+
+                    st.markdown("#### Daily Transaction Trend")
+                    fig = px.line(
+                        daily,
+                        x="Day",
+                        y="Total_Amount",
+                        color="Type",
+                        markers=True,
+                        title="Daily Transaction Value"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    fig = px.bar(
+                        daily,
+                        x="Day",
+                        y="Transactions",
+                        color="Type",
+                        barmode="group",
+                        title="Daily Transaction Count"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                if "Description" in filtered.columns:
+                    top = (
+                        filtered.assign(
+                            Description=filtered["Description"]
+                            .fillna("Unknown").astype(str)
+                        )
+                        .groupby("Description", as_index=False)
+                        .agg(
+                            Total_Amount=("Amount", "sum"),
+                            Transactions=("Amount", "size")
+                        )
+                        .sort_values("Total_Amount", ascending=False)
+                        .head(10)
+                    )
+
+                    st.markdown("#### Top 10 Transaction Descriptions")
+                    fig = px.bar(
+                        top.sort_values("Total_Amount"),
+                        x="Total_Amount",
+                        y="Description",
+                        orientation="h",
+                        hover_data=["Transactions"],
+                        title="Highest Transaction Values by Description"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### Combined Transaction Table")
+                st.dataframe(
+                    filtered,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Filtered Transactions CSV",
+                    data=filtered.to_csv(index=False).encode("utf-8"),
+                    file_name="cardshield_filtered_transactions.csv",
+                    mime="text/csv"
+                )
+
+        else:
+            st.warning("No transactions were extracted from the selected files.")
+
+
+
+# ---------------- MODEL EVALUATION ----------------
+elif page == "Model Evaluation":
+
+    st.markdown("""
+        <style>
+        .model-heading {
+            font-size: 30px;
+            font-weight: 750;
+            color: #38bdf8;
+            margin-bottom: 4px;
+        }
+        .model-subtitle {
+            color: #94a3b8;
+            margin-bottom: 22px;
+        }
+        </style>
+        <div class="model-heading">📊 Model Performance Center</div>
+        <div class="model-subtitle">
+            Compare machine learning models and review fraud detection metrics.
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.caption(f"Active model: {model_name}")
+
+    # Load model comparison data
+    comparison = None
+
+    if COMPARISON_PATH.exists():
+        try:
+            comparison = pd.read_csv(COMPARISON_PATH)
+        except Exception as exc:
+            st.error(f"Could not load comparison data: {exc}")
+
+    required_cols = [
+        "Model", "Average Precision", "Precision", "Recall", "F1 Score"
+    ]
+
+    if comparison is not None and all(
+        col in comparison.columns for col in required_cols
+    ):
+        comparison = comparison.copy()
+
+        for col in required_cols[1:]:
+            comparison[col] = pd.to_numeric(
+                comparison[col], errors="coerce"
+            )
+
+        comparison = comparison.dropna(subset=required_cols[1:])
+
+        active_rows = comparison[
+            comparison["Model"].astype(str).str.casefold()
+            == str(model_name).casefold()
+        ]
+
+        if active_rows.empty:
+            active_rows = comparison.tail(1)
+
+        if not comparison.empty and not active_rows.empty:
+            active = active_rows.iloc[0]
+
+            # KPI cards
+            st.subheader("Key Performance Indicators")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Average Precision",
+                f"{active['Average Precision']:.4f}"
+            )
+            c2.metric(
+                "Precision",
+                f"{active['Precision']:.4f}"
+            )
+            c3.metric(
+                "Recall",
+                f"{active['Recall']:.4f}"
+            )
+            c4.metric(
+                "F1 Score",
+                f"{active['F1 Score']:.4f}"
+            )
+
+            st.caption(
+                "These metrics come from the saved model comparison results. "
+                "They describe the evaluation recorded during training."
+            )
+
+            st.divider()
+
+            # Model comparison table and chart
+            left, right = st.columns([1.25, 1])
+
+            with left:
+                st.subheader("Model Comparison")
+
+                styled = (
+                    comparison.style
+                    .format({
+                        "Average Precision": "{:.4f}",
+                        "Precision": "{:.4f}",
+                        "Recall": "{:.4f}",
+                        "F1 Score": "{:.4f}",
+                    })
+                )
+
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with right:
+                st.subheader("Average Precision")
+
+                chart_df = comparison[
+                    ["Model", "Average Precision"]
+                ].set_index("Model")
+
+                st.bar_chart(
+                    chart_df,
+                    y="Average Precision",
+                    color="#38bdf8",
+                    height=300
+                )
+
+            st.divider()
+
+            # Compare all metrics
+            st.subheader("Performance Across Metrics")
+
+            metric_chart = comparison.set_index("Model")[
+                ["Precision", "Recall", "F1 Score"]
+            ]
+
+            st.bar_chart(
+                metric_chart,
+                height=350
+            )
+
+            # Active model insight
+            st.subheader("Model Insights")
+
+            st.markdown(
+                f"""
+                **Selected model:** {model_name}
+
+                - **Precision:** {active['Precision']:.4f}
+                - **Recall:** {active['Recall']:.4f}
+                - **F1 Score:** {active['F1 Score']:.4f}
+                - **Average Precision:** {active['Average Precision']:.4f}
+                """
+            )
+
+            st.info(
+                "Fraud detection uses imbalanced data. A high precision score "
+                "does not mean every fraud case is caught. Review recall, "
+                "false negatives, false positives and the chosen alert threshold."
+            )
+
+            # Export comparison
+            st.download_button(
+                "⬇️ Download Model Comparison CSV",
+                data=comparison.to_csv(index=False).encode("utf-8"),
+                file_name="cardshield_model_comparison.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        else:
+            st.warning("No valid model comparison rows are available.")
+
+    else:
+        st.warning(
+            "Model comparison data is missing or does not contain the expected columns. "
+            "Check model_comparison.csv or run your training script."
+        )
+
+        ap = bundle.get("average_precision")
+
+        if ap is not None:
+            st.metric(
+                "Saved Test-Set Average Precision",
+                f"{float(ap):.4f}"
+            )
+
+    st.divider()
+
+    st.subheader("Deployment Checklist")
+
+    st.markdown("""
+    - Evaluate on an untouched test dataset.
+    - Check precision and recall at different thresholds.
+    - Review false positives and false negatives.
+    - Monitor data quality and model drift.
+    - Require human review before consequential action.
+    """)
+
+    # Prepare a safe analytics copy
+    overview = df.copy()
+    overview["Class"] = pd.to_numeric(
+        overview["Class"], errors="coerce"
+    )
+    overview["Amount"] = pd.to_numeric(
+        overview["Amount"], errors="coerce"
+    )
+    overview = overview.replace([np.inf, -np.inf], np.nan)
+    overview = overview.dropna(subset=["Class", "Amount"])
+    overview = overview[overview["Class"].isin([0, 1])].copy()
+
+    if overview.empty:
+        st.warning("No valid transactions available.")
+        st.stop()
+
+    # Interactive filters
+    st.subheader("🔎 Analytics Filters")
+
+    filter_col1, filter_col2 = st.columns([2, 1])
+
+    amount_min = float(overview["Amount"].min())
+    amount_max = float(overview["Amount"].max())
+
+    with filter_col1:
+        if amount_min < amount_max:
+            selected_amount = st.slider(
+                "Transaction amount",
+                min_value=amount_min,
+                max_value=amount_max,
+                value=(amount_min, amount_max),
+                key="overview_amount_filter",
+            )
+            filtered = overview[
+                overview["Amount"].between(
+                    selected_amount[0], selected_amount[1]
+                )
+            ].copy()
+        else:
+            filtered = overview.copy()
+
+    with filter_col2:
+        label_filter = st.selectbox(
+            "Transaction label",
+            ["All", "Normal", "Fraud"],
+            key="overview_label_filter",
+        )
+
+    if label_filter == "Normal":
+        filtered = filtered[filtered["Class"] == 0]
+    elif label_filter == "Fraud":
+        filtered = filtered[filtered["Class"] == 1]
+
+    if filtered.empty:
+        st.warning("No transactions match the selected filters.")
+        st.stop()
+
+    # KPI calculations
+    total = len(filtered)
+    fraud_count = int((filtered["Class"] == 1).sum())
+    normal_count = int((filtered["Class"] == 0).sum())
+    fraud_rate = fraud_count / total * 100
+    total_amount = float(filtered["Amount"].sum())
+    avg_amount = float(filtered["Amount"].mean())
+
+    st.subheader("📊 Key Risk Indicators")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Transactions", f"{total:,}")
+    k2.metric("Fraud-labelled", f"{fraud_count:,}")
+    k3.metric("Normal-labelled", f"{normal_count:,}")
+    k4.metric("Labelled fraud rate", f"{fraud_rate:.3f}%")
+
+    k5, k6 = st.columns(2)
+    k5.metric("Total transaction amount", f"{total_amount:,.2f}")
+    k6.metric("Average transaction amount", f"{avg_amount:,.2f}")
+
+    st.caption(
+        "Amounts are shown in dataset units; currency is unverified. "
+        "Fraud metrics describe existing dataset labels, not live predictions."
+    )
+
+    st.divider()
+
+    # Consistent dark chart theme
+    plt.style.use("dark_background")
+
+    left, right = st.columns([1, 1])
+
+    # Donut chart
+    with left:
+        st.subheader("🍩 Transaction Distribution")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#0e1117")
+
+        values = [normal_count, fraud_count]
+        colors = ["#22d3ee", "#fb7185"]
+
+        if sum(values) > 0:
+            wedges, _, _ = ax.pie(
+                values,
+                colors=colors,
+                startangle=90,
+                autopct=lambda p: f"{p:.2f}%" if p >= 0.1 else "",
+                pctdistance=0.78,
+                wedgeprops={
+                    "width": 0.40,
+                    "edgecolor": "#0e1117",
+                },
+                textprops={"color": "white"},
+            )
+
+            ax.text(
+                0, 0,
+                f"{total:,}\nRows",
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=15,
+                fontweight="bold",
+            )
+
+            ax.legend(
+                wedges,
+                [
+                    f"Normal: {normal_count:,}",
+                    f"Fraud: {fraud_count:,}",
+                ],
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.12),
+                ncol=2,
+                frameon=False,
+            )
+
+        ax.set_title("Labelled Transaction Mix")
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    # Transaction amount chart
+    with right:
+        st.subheader("💳 Transaction Amount Analysis")
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#0e1117")
+
+        for label, color, name in [
+            (0, "#22d3ee", "Normal"),
+            (1, "#fb7185", "Fraud"),
+        ]:
+            values = filtered.loc[
+                filtered["Class"] == label, "Amount"
+            ]
+
+            if not values.empty:
+                sns.histplot(
+                    values,
+                    bins=30,
+                    element="step",
+                    stat="count",
+                    color=color,
+                    alpha=0.45,
+                    label=name,
+                    ax=ax,
+                )
+
+        ax.set_xlabel("Transaction amount")
+        ax.set_ylabel("Number of rows")
+        ax.set_title("Amount Distribution")
+        ax.legend()
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    st.divider()
+
+    # Time trend
+    if "Time" in filtered.columns:
+        st.subheader("📈 Transaction Activity Over Time")
+
+        time_data = filtered[["Time", "Class"]].copy()
+        time_data["Time"] = pd.to_numeric(
+            time_data["Time"], errors="coerce"
+        )
+        time_data = time_data.dropna(subset=["Time"])
+
+        if not time_data.empty:
+            time_data["Time interval"] = (
+                time_data["Time"] // 3600
+            ).astype(int)
+
+            trend = time_data.groupby("Time interval").agg(
+                Transactions=("Class", "size"),
+                Fraud=("Class", "sum"),
+            )
+
+            st.line_chart(
+                trend,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "Time intervals represent elapsed hours derived from "
+                "the dataset's Time column, not actual calendar hours."
+            )
+
+    # Preview and export
+    st.divider()
+    st.subheader("📋 Filtered Transaction Preview")
+
+    preview_cols = [
+        c for c in ["Time", "Amount", "Class"]
+        if c in filtered.columns
+    ]
+    st.dataframe(
+        filtered[preview_cols].head(100),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.download_button(
+        "⬇️ Export Filtered Dataset",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="cardshield_overview_report.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "CardShield | Machine-learning fraud monitoring portfolio project"
+    )
+
+
+
+
+# ---------------- FRAUD ANALYTICS ----------------
+
+
+# ---------------- FRAUD ANALYTICS ----------------
+elif page == "Fraud Analytics":
+    st.title("📊 CardShield | Advanced Fraud Analytics")
+    st.caption(
+        "Uploaded transaction analytics • Historical fraud patterns • Risk monitoring"
+    )
+
+    # 1. Prefer uploaded transactions from Screen Transactions
+    uploaded_df = st.session_state.get(
+        "cardshield_uploaded_transactions"
+    )
+
+    if uploaded_df is not None and not uploaded_df.empty:
+        analytics = uploaded_df.copy()
+        st.success("Using your uploaded transaction data.")
+
+        if "Amount" not in analytics.columns:
+            st.error("Uploaded file must contain an Amount column.")
+            st.stop()
+
+        analytics["Amount"] = pd.to_numeric(
+            analytics["Amount"], errors="coerce"
+        )
+        analytics = analytics.replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna(subset=["Amount"]).copy()
+
+        if analytics.empty:
+            st.warning("No valid transaction amounts found.")
+            st.stop()
+
+        if "Type" not in analytics.columns:
+            analytics["Type"] = "Unknown"
+
+        analytics["Type"] = (
+            analytics["Type"].fillna("Unknown").astype(str).str.upper()
+        )
+
+        # Filters
+        st.subheader("🔎 Transaction Filters")
+        min_amount = float(analytics["Amount"].min())
+        max_amount = float(analytics["Amount"].max())
+
+        if min_amount < max_amount:
+            amount_range = st.slider(
+                "Transaction amount range",
+                min_value=min_amount,
+                max_value=max_amount,
+                value=(min_amount, max_amount),
+                key="uploaded_fraud_amount_range",
+            )
+            analytics = analytics[
+                analytics["Amount"].between(*amount_range)
+            ].copy()
+
+        transaction_types = sorted(
+            analytics["Type"].dropna().unique().tolist()
+        )
+        selected_types = st.multiselect(
+            "Transaction type",
+            options=transaction_types,
+            default=transaction_types,
+            key="uploaded_fraud_types",
+        )
+        analytics = analytics[
+            analytics["Type"].isin(selected_types)
+        ].copy()
+
+        if analytics.empty:
+            st.warning("No transactions match the selected filters.")
+            st.stop()
+
+        debit_mask = analytics["Type"].str.contains(
+            r"DEBIT|DR|WITHDRAW|PAYMENT", na=False
+        )
+        credit_mask = analytics["Type"].str.contains(
+            r"CREDIT|CR|DEPOSIT|RECEIVED", na=False
+        )
+        other_mask = ~(debit_mask | credit_mask)
+
+        total = len(analytics)
+        debit_count = int(debit_mask.sum())
+        credit_count = int(credit_mask.sum())
+        debit_amount = float(analytics.loc[debit_mask, "Amount"].sum())
+        credit_amount = float(analytics.loc[credit_mask, "Amount"].sum())
+
+        st.subheader("📌 Uploaded Data — Key Metrics")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Transactions", f"{total:,}")
+        c2.metric("Total Amount", f"{analytics['Amount'].sum():,.2f}")
+        c3.metric("Debit Transactions", f"{debit_count:,}")
+        c4.metric("Credit Transactions", f"{credit_count:,}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Debit Amount", f"{debit_amount:,.2f}")
+        c2.metric("Credit Amount", f"{credit_amount:,.2f}")
+        c3.metric(
+            "Average Amount",
+            f"{analytics['Amount'].mean():,.2f}",
+        )
+
+        st.info(
+            "ये आँकड़े uploaded file से calculate किए गए हैं. "
+            "Debit या Credit अपने-आप fraud साबित नहीं करता. "
+            "Currency की पुष्टि uploaded file के आधार पर करें."
+        )
+
+        # Transaction counts and amounts
+        st.divider()
+        left, right = st.columns(2)
+
+        with left:
+            st.subheader("📊 Transaction Types")
+            type_counts = pd.DataFrame({
+                "Type": ["Debit", "Credit", "Other"],
+                "Transactions": [
+                    debit_count,
+                    credit_count,
+                    int(other_mask.sum()),
+                ],
+            })
+            st.bar_chart(type_counts.set_index("Type"))
+
+        with right:
+            st.subheader("💰 Amount by Transaction Type")
+            type_amounts = pd.DataFrame({
+                "Type": ["Debit", "Credit", "Other"],
+                "Amount": [
+                    debit_amount,
+                    credit_amount,
+                    float(analytics.loc[other_mask, "Amount"].sum()),
+                ],
+            })
+            st.bar_chart(type_amounts.set_index("Type"))
+
+        # Amount distribution
+        st.subheader("💳 Transaction Amount Distribution")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        sns.histplot(
+            data=analytics,
+            x="Amount",
+            hue="Type",
+            bins=30,
+            element="step",
+            stat="count",
+            common_norm=False,
+            ax=ax,
+        )
+        ax.set_xlabel("Transaction Amount")
+        ax.set_ylabel("Number of Transactions")
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+        # Date trend
+        date_col = next(
+            (
+                col for col in ["Date", "_date", "Transaction Date"]
+                if col in analytics.columns
+            ),
+            None,
+        )
+
+        if date_col:
+            dated = analytics.copy()
+            dated["_chart_date"] = pd.to_datetime(
+                dated[date_col], errors="coerce"
+            )
+            dated = dated.dropna(subset=["_chart_date"])
+
+            if not dated.empty:
+                dated["Day"] = dated["_chart_date"].dt.floor("D")
+                daily = dated.groupby("Day")["Amount"].sum()
+
+                st.subheader("📈 Daily Transaction Amount")
+                st.line_chart(daily)
+
+        # Fraud labels, only if present
+        st.divider()
+        st.subheader("🛡️ Fraud Label Analysis")
+
+        if "Class" in analytics.columns:
+            labels = pd.to_numeric(
+                analytics["Class"], errors="coerce"
+            )
+            valid = labels.isin([0, 1])
+
+            if valid.any():
+                fraud_count = int((labels[valid] == 1).sum())
+                genuine_count = int((labels[valid] == 0).sum())
+                labelled_count = int(valid.sum())
+                fraud_rate = fraud_count / labelled_count * 100
+
+                a, b, c = st.columns(3)
+                a.metric("Fraud-labelled Rows", fraud_count)
+                b.metric("Genuine-labelled Rows", genuine_count)
+                c.metric("Labelled Fraud Rate", f"{fraud_rate:.3f}%")
+
+                st.caption(
+                    "These are existing Class labels, not new model predictions."
+                )
+            else:
+                st.info("No valid 0/1 fraud labels found in this upload.")
+        else:
+            st.info(
+                "No verified fraud labels are present. "
+                "This page shows transaction analytics, not confirmed fraud."
+            )
+
+        st.subheader("📄 Uploaded Transaction Records")
+        st.dataframe(analytics, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "⬇️ Download Uploaded Analytics CSV",
+            data=analytics.to_csv(index=False).encode("utf-8"),
+            file_name="cardshield_uploaded_analytics.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_uploaded_analytics",
+        )
+
+        st.caption(
+            "CardShield educational prototype • Not connected to live bank systems."
+        )
+
+        # Prevent historical dataset charts from running below
+        st.stop()
+
+    # 2. Fallback to historical creditcard.csv
+    st.info(
+        "No uploaded transactions found in this session. "
+        "Showing historical creditcard.csv analytics."
+    )
+
+    if df is None:
+        st.error("creditcard.csv could not be loaded.")
+        if dataset_error:
+            st.caption(dataset_error)
+        st.stop()
+
+    if not {"Class", "Amount"}.issubset(df.columns):
+        st.error("Historical dataset must contain Class and Amount columns.")
+        st.stop()
+
+    analytics = df.copy()
+    analytics["Class"] = pd.to_numeric(
+        analytics["Class"], errors="coerce"
+    )
+    analytics["Amount"] = pd.to_numeric(
+        analytics["Amount"], errors="coerce"
+    )
+    analytics = analytics.replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna(subset=["Class", "Amount"])
+    analytics = analytics[
+        analytics["Class"].isin([0, 1])
+    ].copy()
+
+    if analytics.empty:
+        st.warning("No valid historical transaction rows.")
+        st.stop()
+
+    # Historical filters
+    st.subheader("🔎 Historical Dataset Filters")
+    min_amount = float(analytics["Amount"].min())
+    max_amount = float(analytics["Amount"].max())
+
+    if min_amount < max_amount:
+        amount_range = st.slider(
+            "Transaction amount range",
+            min_value=min_amount,
+            max_value=max_amount,
+            value=(min_amount, max_amount),
+            key="historical_amount_range",
+        )
+        analytics = analytics[
+            analytics["Amount"].between(*amount_range)
+        ].copy()
+
+    if "Time" in analytics.columns:
+        analytics["Time"] = pd.to_numeric(
+            analytics["Time"], errors="coerce"
+        )
+        analytics = analytics.dropna(subset=["Time"]).copy()
+
+        if not analytics.empty:
+            t_min = float(analytics["Time"].min())
+            t_max = float(analytics["Time"].max())
+
+            if t_min < t_max:
+                time_range = st.slider(
+                    "Elapsed time range (seconds)",
+                    min_value=t_min,
+                    max_value=t_max,
+                    value=(t_min, t_max),
+                    key="historical_time_range",
+                )
+                analytics = analytics[
+                    analytics["Time"].between(*time_range)
+                ].copy()
+
+    if analytics.empty:
+        st.warning("No historical transactions match the filters.")
+        st.stop()
+
+    fraud = analytics[analytics["Class"] == 1]
+    genuine = analytics[analytics["Class"] == 0]
+    total = len(analytics)
+    fraud_count = len(fraud)
+    genuine_count = len(genuine)
+    fraud_rate = fraud_count / total * 100
+    fraud_amount = float(fraud["Amount"].sum())
+
+    st.subheader("📌 Historical Dataset — Key Metrics")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Transactions", f"{total:,}")
+    c2.metric("Fraud-labelled Rows", f"{fraud_count:,}")
+    c3.metric("Labelled Fraud Rate", f"{fraud_rate:.3f}%")
+    c4.metric("Fraud Amount Total", f"{fraud_amount:,.2f}")
+
+    st.info(
+        "Class 0 = genuine-labelled and Class 1 = fraud-labelled. "
+        "These are existing dataset labels, not new model predictions."
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("📊 Genuine vs Fraud Counts")
+        counts = pd.DataFrame({
+            "Label": ["Genuine", "Fraud"],
+            "Transactions": [genuine_count, fraud_count],
+        })
+        st.bar_chart(counts.set_index("Label"))
+
+    with right:
+        st.subheader("💰 Amount by Label")
+        amounts = pd.DataFrame({
+            "Label": ["Genuine", "Fraud"],
+            "Amount": [
+                float(genuine["Amount"].sum()),
+                fraud_amount,
+            ],
+        })
+        st.bar_chart(amounts.set_index("Label"))
+
+    st.subheader("💳 Amount Distribution")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    sns.histplot(
+        data=analytics,
+        x="Amount",
+        hue="Class",
+        bins=40,
+        element="step",
+        stat="count",
+        common_norm=False,
+        ax=ax,
+    )
+    ax.set_xlabel("Transaction Amount")
+    ax.set_ylabel("Transaction Count")
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    if "Time" in analytics.columns:
+        st.subheader("⏱️ Fraud Trend Over Elapsed Time")
+        time_data = analytics[["Time", "Class"]].copy()
+
+        if time_data["Time"].nunique() > 1:
+            time_data["Time Bin"] = pd.cut(
+                time_data["Time"],
+                bins=min(40, time_data["Time"].nunique()),
+                duplicates="drop",
+            )
+            trend = time_data.groupby(
+                "Time Bin", observed=False
+            ).agg(
+                Fraud=("Class", lambda x: (x == 1).sum()),
+                Genuine=("Class", lambda x: (x == 0).sum()),
+            )
+            trend.index = trend.index.map(
+                lambda interval: interval.mid if pd.notna(interval) else None
+            )
+            st.line_chart(trend)
+
+    st.subheader("📋 Fraud Summary")
+    summary = analytics.groupby("Class").agg(
+        Transactions=("Amount", "size"),
+        Total_Amount=("Amount", "sum"),
+        Average_Amount=("Amount", "mean"),
+        Maximum_Amount=("Amount", "max"),
+    )
+    summary.index = summary.index.map({0: "Genuine", 1: "Fraud"})
+    st.dataframe(summary.round(2), use_container_width=True)
+
+    st.download_button(
+        "⬇️ Download Filtered Historical Analytics",
+        data=analytics.to_csv(index=False).encode("utf-8"),
+        file_name="cardshield_filtered_historical_analytics.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_historical_analytics",
+    )
+
+    st.caption(
+        "CardShield educational prototype • Not connected to live bank systems."
+    )
+
+
+# ---------------- LIVE MONITORING ----------------
+elif page == "Live Monitoring":
+
+    st.title("📡 CardShield | Live Transaction Monitoring")
+    st.caption(
+        "Monitor demo transactions stored in the local SQLite database."
+    )
+
+    st.info(
+        "Demo mode: These are locally simulated transactions, "
+        "not real-time transactions from a bank."
+    )
+
+    if not LIVE_DB_PATH.exists():
+        st.warning("Live database not found.")
+        st.write(
+            "Run live_simulator.py in another terminal first, "
+            "then refresh this page."
+        )
+
+    else:
+        try:
+            with sqlite3.connect(str(LIVE_DB_PATH), timeout=10) as conn:
+                transactions = pd.read_sql_query(
+                    """
+                    SELECT
+                        transaction_id,
+                        transaction_time,
+                        amount,
+                        fraud_probability,
+                        prediction,
+                        risk_band,
+                        source
+                    FROM live_transactions
+                    ORDER BY transaction_time DESC
+                    """,
+                    conn,
+                )
+
+            if transactions.empty:
+                st.warning(
+                    "No transactions found. Start live_simulator.py "
+                    "and refresh this page."
+                )
+
+            else:
+                transactions["amount"] = pd.to_numeric(
+                    transactions["amount"], errors="coerce"
+                )
+                transactions["fraud_probability"] = pd.to_numeric(
+                    transactions["fraud_probability"], errors="coerce"
+                )
+
+                risk = (
+                    transactions["risk_band"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                )
+
+                transactions["Displayed Risk"] = risk.map({
+                    "low": "Normal",
+                    "normal": "Normal",
+                    "medium": "Review",
+                    "review": "Review",
+                    "high": "High Risk",
+                    "high risk": "High Risk",
+                }).fillna("Other")
+
+                total = len(transactions)
+                normal = int(
+                    (transactions["Displayed Risk"] == "Normal").sum()
+                )
+                review = int(
+                    (transactions["Displayed Risk"] == "Review").sum()
+                )
+                high_risk = int(
+                    (transactions["Displayed Risk"] == "High Risk").sum()
+                )
+
+                st.subheader("📊 Monitoring Summary")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Transactions", total)
+                c2.metric("Normal", normal)
+                c3.metric("Review", review)
+                c4.metric("High Risk", high_risk)
+
+                left, right = st.columns(2)
+
+                with left:
+                    st.subheader("Risk Distribution")
+                    risk_counts = (
+                        transactions["Displayed Risk"]
+                        .value_counts()
+                        .reindex(
+                            ["Normal", "Review", "High Risk", "Other"],
+                            fill_value=0,
+                        )
+                    )
+                    st.bar_chart(risk_counts)
+
+                with right:
+                    st.subheader("Transaction Amounts")
+                    amount_data = transactions[
+                        ["transaction_time", "amount"]
+                    ].dropna()
+
+                    if not amount_data.empty:
+                        st.line_chart(
+                            amount_data.set_index("transaction_time")
+                        )
+
+                st.divider()
+                st.subheader("🧾 Recent Transactions")
+                st.dataframe(
+                    transactions[
+                        [
+                            "transaction_id",
+                            "transaction_time",
+                            "amount",
+                            "fraud_probability",
+                            "prediction",
+                            "Displayed Risk",
+                            "source",
+                        ]
+                    ].head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "⬇️ Export Monitoring Data",
+                    data=transactions.to_csv(index=False).encode("utf-8"),
+                    file_name="cardshield_live_monitoring.csv",
+                    mime="text/csv",
+                    key="download_live_monitoring",
+                )
+
+                if st.button("🔄 Refresh Monitoring Data"):
+                    st.rerun()
+
+                st.caption(
+                    "Risk categories come from simulator results. "
+                    "A risk label alone does not confirm fraud."
+                )
+
+        except Exception as exc:
+            st.error("Could not load live monitoring data.")
+            st.code(str(exc))
+
+# ---------------- LIVE MONITORING ----------------
+elif page == "Live Monitoring":
+
+    st.title("📡 CardShield | Live Transaction Monitoring")
+    st.caption("Monitor demo transactions stored in the local SQLite database.")
+
+    st.info(
+        "Demo mode: These are locally simulated transactions, "
+        "not real-time transactions from a bank."
+    )
+
+    if not LIVE_DB_PATH.exists():
+        st.warning("Live database not found.")
+        st.write(
+            "Run live_simulator.py in another terminal first, "
+            "then refresh this page."
+        )
+
+    else:
+        try:
+            with sqlite3.connect(str(LIVE_DB_PATH), timeout=10) as conn:
+                transactions = pd.read_sql_query(
+                    """
+                    SELECT
+                        transaction_id,
+                        transaction_time,
+                        amount,
+                        fraud_probability,
+                        prediction,
+                        risk_band,
+                        source
+                    FROM live_transactions
+                    ORDER BY transaction_time DESC
+                    """,
+                    conn,
+                )
+
+            if transactions.empty:
+                st.warning(
+                    "No transactions found. Start live_simulator.py "
+                    "and refresh this page."
+                )
+
+            else:
+                transactions["amount"] = pd.to_numeric(
+                    transactions["amount"], errors="coerce"
+                )
+
+                transactions["fraud_probability"] = pd.to_numeric(
+                    transactions["fraud_probability"], errors="coerce"
+                )
+
+                risk = (
+                    transactions["risk_band"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                )
+
+                transactions["Displayed Risk"] = risk.map({
+                    "low": "Normal",
+                    "normal": "Normal",
+                    "medium": "Review",
+                    "review": "Review",
+                    "high": "High Risk",
+                    "high risk": "High Risk",
+                }).fillna("Other")
+
+                total = len(transactions)
+                normal = int(
+                    (transactions["Displayed Risk"] == "Normal").sum()
+                )
+                review = int(
+                    (transactions["Displayed Risk"] == "Review").sum()
+                )
+                high_risk = int(
+                    (transactions["Displayed Risk"] == "High Risk").sum()
+                )
+
+                st.subheader("📊 Monitoring Summary")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Transactions", total)
+                c2.metric("Normal", normal)
+                c3.metric("Review", review)
+                c4.metric("High Risk", high_risk)
+
+                st.divider()
+
+                left, right = st.columns(2)
+
+                with left:
+                    st.subheader("Risk Distribution")
+                    risk_counts = (
+                        transactions["Displayed Risk"]
+                        .value_counts()
+                        .reindex(
+                            ["Normal", "Review", "High Risk", "Other"],
+                            fill_value=0,
+                        )
+                    )
+                    st.bar_chart(risk_counts)
+
+                with right:
+                    st.subheader("Transaction Amounts")
+                    amount_data = transactions[
+                        ["transaction_time", "amount"]
+                    ].dropna()
+
+                    st.line_chart(
+                        amount_data.set_index("transaction_time")
+                    )
+
+                st.divider()
+                st.subheader("🧾 Recent Transactions")
+
+                st.dataframe(
+                    transactions[
+                        [
+                            "transaction_id",
+                            "transaction_time",
+                            "amount",
+                            "fraud_probability",
+                            "prediction",
+                            "Displayed Risk",
+                            "source",
+                        ]
+                    ].head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "⬇️ Export Monitoring Data",
+                    data=transactions.to_csv(index=False).encode("utf-8"),
+                    file_name="cardshield_live_monitoring.csv",
+                    mime="text/csv",
+                )
+
+                if st.button("🔄 Refresh Monitoring Data"):
+                    st.rerun()
+
+                st.caption(
+                    "Risk categories come from the saved simulator results. "
+                    "A risk label alone does not confirm fraud."
+                )
+
+        except Exception as exc:
+            st.error("Could not load live monitoring data.")
+            st.code(str(exc))
+# ---------------- SCREEN TRANSACTIONS ----------------
+
+
+
+
+# ---------------- SCREEN TRANSACTIONS ----------------
+elif page == "Screen Transactions":
+    st.title("🔍 CardShield | Transaction Screening")
+    st.caption(
+        "Upload CSV transaction files or supported text-based PhonePe PDF statements."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload CSV or PDF files",
+        type=["csv", "pdf"],
+        accept_multiple_files=True,
+        key="combined_transaction_upload"
+    )
+
+    if uploaded_files:
+        all_transactions = []
+
+        for uploaded_file in uploaded_files:
+            try:
+                if uploaded_file.name.lower().endswith(".csv"):
+                    raw_df = pd.read_csv(uploaded_file)
+
+                    rename_map = {}
+                    for col in raw_df.columns:
+                        name = str(col).strip().lower()
+
+                        if name in ["date", "transaction date", "txn date"]:
+                            rename_map[col] = "Date"
+                        elif name in [
+                            "description", "merchant", "details",
+                            "narration", "transaction details"
+                        ]:
+                            rename_map[col] = "Description"
+                        elif name in [
+                            "type", "transaction type", "dr/cr",
+                            "transaction direction"
+                        ]:
+                            rename_map[col] = "Type"
+                        elif name in [
+                            "amount", "transaction amount", "txn amount"
+                        ]:
+                            rename_map[col] = "Amount"
+
+                    raw_df = raw_df.rename(columns=rename_map)
+
+                    if "Amount" not in raw_df.columns:
+                        st.error(
+                            f"{uploaded_file.name}: Amount column not found. "
+                            "Please check the CSV column names."
+                        )
+                        continue
+
+                    raw_df["Amount"] = pd.to_numeric(
+                        raw_df["Amount"].astype(str).str.replace(
+                            r"[₹,\s]", "", regex=True
+                        ),
+                        errors="coerce"
+                    )
+
+                    raw_df["Source File"] = uploaded_file.name
+                    all_transactions.append(raw_df)
+
+                elif uploaded_file.name.lower().endswith(".pdf"):
+                    import datetime
+
+                    records = []
+
+                    date_pattern = re.compile(
+                        r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+                        r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+                        r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+                        r"Dec(?:ember)?)\s+(\d{1,2}),\s*(\d{4})\s+(.*)$",
+                        re.IGNORECASE
+                    )
+
+                    amount_pattern = re.compile(
+                        r"\b(DEBIT|CREDIT)\s*₹\s*([\d,]+(?:\.\d{1,2})?)",
+                        re.IGNORECASE
+                    )
+
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        for page_no, page_obj in enumerate(pdf.pages, 1):
+                            page_text = page_obj.extract_text() or ""
+                            blocks = []
+                            current = []
+
+                            for line in page_text.splitlines():
+                                line = line.strip()
+
+                                if date_pattern.match(line):
+                                    if current:
+                                        blocks.append(current)
+                                    current = [line]
+                                elif current:
+                                    current.append(line)
+
+                            if current:
+                                blocks.append(current)
+
+                            for block in blocks:
+                                match = date_pattern.match(block[0])
+                                if not match:
+                                    continue
+
+                                month, day, year, remainder = match.groups()
+
+                                try:
+                                    date_value = datetime.datetime.strptime(
+                                        f"{month[:3].title()} {day}, {year}",
+                                        "%b %d, %Y"
+                                    )
+                                except ValueError:
+                                    continue
+
+                                amount_match = amount_pattern.search(remainder)
+                                if not amount_match:
+                                    continue
+
+                                txn_type = amount_match.group(1).upper()
+                                amount = float(
+                                    amount_match.group(2).replace(",", "")
+                                )
+                                description = remainder[
+                                    :amount_match.start()
+                                ].strip()
+
+                                txn_time = ""
+                                transaction_id = ""
+                                utr = ""
+
+                                for detail in block[1:]:
+                                    time_match = re.match(
+                                        r"^\s*(\d{4})\s*(am|pm)\b",
+                                        detail,
+                                        re.IGNORECASE
+                                    )
+
+                                    if time_match:
+                                        digits, ampm = time_match.groups()
+                                        hour = int(digits[:2])
+                                        minute = int(digits[2:])
+
+                                        if hour <= 12 and minute < 60:
+                                            hour = hour % 12
+                                            if ampm.lower() == "pm":
+                                                hour += 12
+                                            txn_time = f"{hour:02d}:{minute:02d}"
+
+                                    tid = re.search(
+                                        r"Transaction ID\s+([A-Za-z0-9]+)",
+                                        detail,
+                                        re.IGNORECASE
+                                    )
+                                    if tid:
+                                        transaction_id = tid.group(1)
+
+                                    utr_match = re.search(
+                                        r"UTR No\.?\s*([A-Za-z0-9]+)",
+                                        detail,
+                                        re.IGNORECASE
+                                    )
+                                    if utr_match:
+                                        utr = utr_match.group(1)
+
+                                records.append({
+                                    "Date": pd.Timestamp(date_value),
+                                    "Time": txn_time,
+                                    "Description": description,
+                                    "Type": txn_type,
+                                    "Amount": amount,
+                                    "Transaction ID": transaction_id,
+                                    "UTR": utr,
+                                    "Source File": uploaded_file.name,
+                                    "Source Page": page_no
+                                })
+
+                    if records:
+                        all_transactions.append(pd.DataFrame(records))
+                        st.success(
+                            f"{uploaded_file.name}: "
+                            f"{len(records)} transactions extracted."
+                        )
+                    else:
+                        st.warning(
+                            f"No supported transactions found in "
+                            f"{uploaded_file.name}. Scanned PDFs may need OCR."
+                        )
+
+            except Exception as exc:
+                st.error(
+                    f"Could not process {uploaded_file.name}: {exc}"
+                )
+
+        if all_transactions:
+            combined_df = pd.concat(
+                all_transactions,
+                ignore_index=True,
+                sort=False
+            )
+
+            if "Amount" not in combined_df.columns:
+                st.error("No Amount column found.")
+                st.stop()
+
+            combined_df["Amount"] = pd.to_numeric(
+                combined_df["Amount"], errors="coerce"
+            )
+            combined_df = combined_df.dropna(
+                subset=["Amount"]
+            ).copy()
+
+            if combined_df.empty:
+                st.error("No valid numeric transaction amounts were found.")
+                st.stop()
+
+            if "Type" not in combined_df.columns:
+                combined_df["Type"] = "Unknown"
+
+            combined_df["Type"] = (
+                combined_df["Type"]
+                .fillna("Unknown")
+                .astype(str)
+                .str.upper()
+                .str.strip()
+            )
+
+            if "Date" in combined_df.columns:
+                combined_df["Date"] = pd.to_datetime(
+                    combined_df["Date"], errors="coerce"
+                )
+
+            # Share the uploaded dataset with other pages in this session.
+            st.session_state["cardshield_uploaded_transactions"] = (
+                combined_df.copy()
+            )
+
+            st.success(
+                f"Loaded {len(combined_df):,} transactions from "
+                f"{combined_df['Source File'].nunique() if 'Source File' in combined_df.columns else len(uploaded_files)} file(s)."
+            )
+
+            st.info(
+                "Uploaded transactions are saved for this Streamlit session. "
+                "They are not automatically saved permanently to a database."
+            )
+
+            st.divider()
+            st.subheader("📊 Uploaded Transaction Intelligence")
+
+            # Filters
+            f1, f2 = st.columns(2)
+
+            with f1:
+                types = sorted(
+                    combined_df["Type"].dropna().unique().tolist()
+                )
+                selected_types = st.multiselect(
+                    "Transaction type",
+                    options=types,
+                    default=types,
+                    key="screen_transaction_types"
+                )
+
+            with f2:
+                min_amount = float(combined_df["Amount"].min())
+                max_amount = float(combined_df["Amount"].max())
+
+                if min_amount == max_amount:
+                    amount_range = (min_amount, max_amount)
+                    st.caption(f"Transaction amount: ₹{min_amount:,.2f}")
+                else:
+                    amount_range = st.slider(
+                        "Transaction amount range (₹)",
+                        min_value=min_amount,
+                        max_value=max_amount,
+                        value=(min_amount, max_amount),
+                        key="screen_transaction_amount_range"
+                    )
+
+            filtered = combined_df[
+                combined_df["Type"].isin(selected_types)
+                & combined_df["Amount"].between(
+                    amount_range[0], amount_range[1]
+                )
+            ].copy()
+
+            debit_mask = filtered["Type"].str.contains(
+                r"DEBIT|DR|WITHDRAW|PAYMENT",
+                regex=True,
+                na=False
+            )
+            credit_mask = filtered["Type"].str.contains(
+                r"CREDIT|CR|DEPOSIT|RECEIVED",
+                regex=True,
+                na=False
+            )
+
+            total_debit = filtered.loc[debit_mask, "Amount"].sum()
+            total_credit = filtered.loc[credit_mask, "Amount"].sum()
+            avg_amount = (
+                filtered["Amount"].mean()
+                if not filtered.empty else 0
+            )
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Transactions", f"{len(filtered):,}")
+            k2.metric("Total Debit", f"₹{total_debit:,.2f}")
+            k3.metric("Total Credit", f"₹{total_credit:,.2f}")
+            k4.metric("Average Amount", f"₹{avg_amount:,.2f}")
+
+            if filtered.empty:
+                st.warning("No transactions match the selected filters.")
+            else:
+                left, right = st.columns(2)
+
+                with left:
+                    st.markdown("#### Debit vs Credit")
+                    flow_df = pd.DataFrame({
+                        "Category": ["Debit", "Credit"],
+                        "Amount": [total_debit, total_credit]
+                    })
+
+                    fig = px.pie(
+                        flow_df,
+                        names="Category",
+                        values="Amount",
+                        hole=0.58,
+                        title="Money Flow Distribution"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with right:
+                    st.markdown("#### Transaction Amount Distribution")
+                    fig = px.histogram(
+                        filtered,
+                        x="Amount",
+                        color="Type",
+                        nbins=25,
+                        title="Uploaded Transaction Amounts",
+                        marginal="box"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                if (
+                    "Date" in filtered.columns
+                    and filtered["Date"].notna().any()
+                ):
+                    daily = (
+                        filtered.dropna(subset=["Date"])
+                        .assign(Day=lambda x: x["Date"].dt.date)
+                        .groupby(["Day", "Type"], as_index=False)
+                        .agg(
+                            Transactions=("Amount", "size"),
+                            Total_Amount=("Amount", "sum")
+                        )
+                    )
+
+                    st.markdown("#### Daily Transaction Value")
+                    fig = px.line(
+                        daily,
+                        x="Day",
+                        y="Total_Amount",
+                        color="Type",
+                        markers=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.markdown("#### Daily Transaction Count")
+                    fig = px.bar(
+                        daily,
+                        x="Day",
+                        y="Transactions",
+                        color="Type",
+                        barmode="group"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                if "Description" in filtered.columns:
+                    top = (
+                        filtered.assign(
+                            Description=filtered["Description"]
+                            .fillna("Unknown")
+                            .astype(str)
+                        )
+                        .groupby("Description", as_index=False)
+                        .agg(
+                            Total_Amount=("Amount", "sum"),
+                            Transactions=("Amount", "size")
+                        )
+                        .sort_values(
+                            "Total_Amount",
+                            ascending=False
+                        )
+                        .head(10)
+                    )
+
+                    st.markdown("#### Top 10 Transaction Descriptions")
+                    fig = px.bar(
+                        top.sort_values("Total_Amount"),
+                        x="Total_Amount",
+                        y="Description",
+                        orientation="h",
+                        hover_data=["Transactions"],
+                        title="Highest Transaction Values"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### Uploaded Transactions Table")
+                st.dataframe(
+                    filtered,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.download_button(
+                    "⬇️ Download Filtered Transactions CSV",
+                    data=filtered.to_csv(index=False).encode("utf-8"),
+                    file_name="cardshield_filtered_transactions.csv",
+                    mime="text/csv",
+                    key="download_filtered_transactions"
+                )
+
+            # Clearly separate real labels from predictions.
+            if "Class" in combined_df.columns:
+                st.divider()
+                st.subheader("🏷️ Existing Fraud Labels")
+
+                st.caption(
+                    "These counts use labels already present in the uploaded CSV. "
+                    "They are not new model predictions."
+                )
+
+                labels = pd.to_numeric(
+                    combined_df["Class"], errors="coerce"
+                )
+                labelled = labels.isin([0, 1])
+
+                if labelled.any():
+                    labelled_df = combined_df.loc[labelled].copy()
+                    labelled_df["Class"] = labels.loc[labelled].astype(int)
+
+                    fraud_count = int(
+                        (labelled_df["Class"] == 1).sum()
+                    )
+                    genuine_count = int(
+                        (labelled_df["Class"] == 0).sum()
+                    )
+                    fraud_rate = (
+                        fraud_count / len(labelled_df) * 100
+                        if len(labelled_df) else 0
+                    )
+
+                    a, b, c = st.columns(3)
+                    a.metric("Labelled Transactions", f"{len(labelled_df):,}")
+                    b.metric("Fraud-labelled Rows", f"{fraud_count:,}")
+                    c.metric("Labelled Fraud Rate", f"{fraud_rate:.3f}%")
+
+                    st.caption(
+                        f"Genuine-labelled rows: {genuine_count:,}. "
+                        "Labels are only as reliable as the uploaded data."
+                    )
+                else:
+                    st.info(
+                        "No valid 0/1 fraud labels were found in the uploaded data."
+                    )
+
+        else:
+            st.warning(
+                "No transactions were extracted. Check the uploaded files."
+            )
+
+    else:
+        st.info(
+            "Upload a CSV or supported text-based PhonePe PDF to begin."
+        )
+
+        # Keep previous session upload visible after page navigation.
+        saved_df = st.session_state.get(
+            "cardshield_uploaded_transactions"
+        )
+
+        if saved_df is not None and not saved_df.empty:
+            st.success(
+                f"Previously uploaded session data is available: "
+                f"{len(saved_df):,} transactions."
+            )
+            st.dataframe(
+                saved_df.head(20),
+                use_container_width=True,
+                hide_index=True
+            )
+
+
+# ---------------- MODEL EVALUATION ----------------
+elif page == "Model Evaluation":
+
+    st.markdown("""
+        <style>
+        .model-heading {
+            font-size: 30px;
+            font-weight: 750;
+            color: #38bdf8;
+            margin-bottom: 4px;
+        }
+        .model-subtitle {
+            color: #94a3b8;
+            margin-bottom: 22px;
+        }
+        </style>
+        <div class="model-heading">📊 Model Performance Center</div>
+        <div class="model-subtitle">
+            Compare machine-learning models and review saved evaluation metrics.
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.caption(f"Active model: {model_name}")
+
+    comparison = None
+
+    if COMPARISON_PATH.exists():
+        try:
+            comparison = pd.read_csv(COMPARISON_PATH)
+        except Exception as exc:
+            st.error(f"Could not load comparison data: {exc}")
+
+    required_cols = [
+        "Model", "Average Precision", "Precision", "Recall", "F1 Score"
+    ]
+
+    if comparison is not None and all(
+        col in comparison.columns for col in required_cols
+    ):
+        comparison = comparison.copy()
+
+        for col in required_cols[1:]:
+            comparison[col] = pd.to_numeric(
+                comparison[col], errors="coerce"
+            )
+
+        comparison = comparison.dropna(subset=required_cols[1:])
+
+        active_rows = comparison[
+            comparison["Model"].astype(str).str.casefold()
+            == str(model_name).casefold()
+        ]
+
+        if active_rows.empty:
+            active_rows = comparison.tail(1)
+
+        if not comparison.empty and not active_rows.empty:
+            active = active_rows.iloc[0]
+
+            st.subheader("Key Performance Indicators")
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Average Precision",
+                f"{active['Average Precision']:.4f}"
+            )
+            c2.metric("Precision", f"{active['Precision']:.4f}")
+            c3.metric("Recall", f"{active['Recall']:.4f}")
+            c4.metric("F1 Score", f"{active['F1 Score']:.4f}")
+
+            st.caption(
+                "These are saved test-set evaluation metrics from model training. "
+                "They do not change when a new transaction file is uploaded."
+            )
+
+            st.divider()
+            left, right = st.columns([1.25, 1])
+
+            with left:
+                st.subheader("Model Comparison")
+                styled = comparison.style.format({
+                    "Average Precision": "{:.4f}",
+                    "Precision": "{:.4f}",
+                    "Recall": "{:.4f}",
+                    "F1 Score": "{:.4f}",
+                })
+
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with right:
+                st.subheader("Average Precision")
+                chart_df = comparison[
+                    ["Model", "Average Precision"]
+                ].set_index("Model")
+
+                st.bar_chart(
+                    chart_df,
+                    y="Average Precision",
+                    color="#38bdf8",
+                    height=300
+                )
+
+            st.divider()
+            st.subheader("Performance Across Metrics")
+
+            metric_chart = comparison.set_index("Model")[
+                ["Precision", "Recall", "F1 Score"]
+            ]
+            st.bar_chart(metric_chart, height=350)
+
+            st.subheader("Model Insights")
+            st.markdown(f"""
+            **Selected model:** {model_name}
+
+            - **Precision:** {active['Precision']:.4f}
+            - **Recall:** {active['Recall']:.4f}
+            - **F1 Score:** {active['F1 Score']:.4f}
+            - **Average Precision:** {active['Average Precision']:.4f}
+            """)
+
+            st.info(
+                "Fraud datasets are often highly imbalanced. Review recall, "
+                "false negatives, false positives, and the alert threshold. "
+                "Model output is decision support, not proof of fraud."
+            )
+
+            st.download_button(
+                "⬇️ Download Model Comparison CSV",
+                data=comparison.to_csv(index=False).encode("utf-8"),
+                file_name="cardshield_model_comparison.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_model_comparison"
+            )
+
+        else:
+            st.warning("No valid model comparison rows are available.")
+
+    else:
+        st.warning(
+            "Model comparison data is missing or has unexpected columns. "
+            "Check model_comparison.csv or run your training script."
+        )
+
+        ap = bundle.get("average_precision")
+        if ap is not None:
+            st.metric(
+                "Saved Test-Set Average Precision",
+                f"{float(ap):.4f}"
+            )
+
+    st.divider()
+    st.subheader("Deployment Checklist")
+
+    st.markdown("""
+    - Evaluate on an untouched test dataset.
+    - Review precision and recall at multiple thresholds.
+    - Monitor false positives, false negatives, and data quality.
+    - Monitor model drift after deployment.
+    - Require human review before consequential action.
+    """)
+
 
 
 
