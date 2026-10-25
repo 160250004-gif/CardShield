@@ -12,6 +12,8 @@ import re
 import plotly.express as px
 
 import pdfplumber
+from live_monitoring import render_live_monitoring
+
 from pathlib import Path
 from sklearn.metrics import(
     precision_score, recall_score, f1_score, confusion_matrix,
@@ -545,34 +547,138 @@ else:
 
 # ---------------- EXECUTIVE OVERVIEW ----------------
 
+
 # ---------------- EXECUTIVE OVERVIEW ----------------
 if page == "Executive Overview":
     st.markdown("""
         <style>
         .hero-card {
-            padding: 22px;
-            border-radius: 16px;
-            background: linear-gradient(135deg, #172554, #102a43);
-            border: 1px solid #25476a;
-            margin-bottom: 22px;
+            padding: 30px;
+            border-radius: 18px;
+            background: linear-gradient(120deg, #101f46, #12334b);
+            border: 1px solid #315477;
+            margin-bottom: 24px;
         }
-        .hero-card h2 {
+        .hero-card h1 {
             color: #f8fafc;
-            margin: 0;
+            font-size: 2.2rem;
+            margin-bottom: 8px;
         }
         .hero-card p {
             color: #cbd5e1;
+            font-size: 1.05rem;
             margin-bottom: 0;
+        }
+        .section-card {
+            background: #171d2b;
+            border: 1px solid #30394a;
+            border-radius: 14px;
+            padding: 20px;
+            min-height: 155px;
+        }
+        .section-card h3 {
+            color: #f8fafc;
+            margin-top: 0;
+        }
+        .section-card p {
+            color: #cbd5e1;
+            font-size: 0.95rem;
+        }
+        .workflow {
+            background: #101827;
+            border: 1px solid #30394a;
+            border-radius: 14px;
+            padding: 20px;
+            margin-top: 12px;
         }
         </style>
     """, unsafe_allow_html=True)
 
     st.markdown("""
         <div class="hero-card">
-            <h2>🛡️ CardShield Command Center</h2>
-            <p>Fraud intelligence · Transaction monitoring · ML-powered risk analysis</p>
+            <h1>🛡️ CardShield Fraud Intelligence</h1>
+            <p>
+                Credit Card Fraud Detection & Transaction Risk Analysis
+            </p>
         </div>
     """, unsafe_allow_html=True)
+
+    st.subheader("Welcome to CardShield")
+    st.write(
+        "Screen supported transaction files, estimate fraud risk, "
+        "and review clear prediction results. Upload your own data "
+        "from the Transaction Screening or Live Monitoring page."
+    )
+
+    st.markdown("### Core Capabilities")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("""
+            <div class="section-card">
+                <h3>🔍 Fraud Detection</h3>
+                <p>
+                    Use the trained machine-learning model to estimate
+                    whether supported credit-card transactions may be
+                    fraudulent.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("""
+            <div class="section-card">
+                <h3>📊 Transaction Risk Analysis</h3>
+                <p>
+                    Review prediction labels, fraud probability,
+                    transaction summaries, and downloadable results
+                    after uploading compatible data.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        st.markdown("""
+            <div class="section-card">
+                <h3>📁 Flexible File Upload</h3>
+                <p>
+                    Upload a supported CSV or PDF. The file must contain
+                    the columns or format required by its analysis method.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with c4:
+        st.markdown("""
+            <div class="section-card">
+                <h3>⚙️ Automated Monitoring</h3>
+                <p>
+                    Use Live Monitoring to observe the demonstration
+                    simulator and its transaction risk predictions.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("### How It Works")
+
+    st.markdown("""
+        <div class="workflow">
+            <b>1. Upload</b> — Select a supported transaction file.<br><br>
+            <b>2. Validate</b> — Check whether the file has the required format.<br><br>
+            <b>3. Analyze</b> — Apply the relevant model or risk rules.<br><br>
+            <b>4. Review</b> — Inspect predictions and download results.
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.info(
+        "Privacy & scope: CardShield is an educational prototype. "
+        "It does not connect to live banking systems. Predictions are "
+        "estimates, not proof of fraud. No historical dataset statistics "
+        "are displayed on this Overview page."
+    )
 
   # ---------------- SCREEN TRANSACTIONS ----------------
 elif page == "Screen Transactions":
@@ -1796,191 +1902,24 @@ elif page == "Fraud Analytics":
 # ---------------- LIVE MONITORING ----------------
 elif page == "Live Monitoring":
 
-    st.title("📡 CardShield | Live Transaction Monitoring")
-    st.caption("Monitor simulated transactions and sample CSV data.")
-
-    st.info(
-        "Demo mode: This page uses simulated/sample data, "
-        "not real-time transactions from a bank."
+    st.title("📡 CardShield | Live Fraud Monitoring")
+    st.caption(
+        "Upload transaction data, detect potential fraud, "
+        "and review the results."
     )
 
     try:
-        if LIVE_DB_PATH.exists():
-            with sqlite3.connect(str(LIVE_DB_PATH), timeout=10) as conn:
-                transactions = pd.read_sql_query(
-                    """
-                    SELECT
-                        transaction_id,
-                        transaction_time,
-                        amount,
-                        fraud_probability,
-                        prediction,
-                        risk_band,
-                        source
-                    FROM live_transactions
-                    ORDER BY transaction_time DESC
-                    """,
-                    conn,
-                )
-        else:
-            demo_path = Path(__file__).resolve().parent / "demo_transactions.csv"
+        from live_monitoring import render_live_monitoring
 
-            if not demo_path.exists():
-                st.error("Live database and demo_transactions.csv were not found.")
-                st.stop()
-
-            transactions = pd.read_csv(demo_path)
-
-            # Add missing columns so the sample data can be displayed.
-            if "transaction_id" not in transactions.columns:
-                transactions["transaction_id"] = [
-                    f"DEMO-{i + 1:06d}" for i in range(len(transactions))
-                ]
-
-            if "transaction_time" not in transactions.columns:
-                transactions["transaction_time"] = pd.Timestamp.now().isoformat()
-
-            if "amount" not in transactions.columns:
-                transactions["amount"] = 0.0
-
-            if "fraud_probability" not in transactions.columns:
-                transactions["fraud_probability"] = 0.0
-
-            if "prediction" not in transactions.columns:
-                transactions["prediction"] = "Demo"
-
-            if "risk_band" not in transactions.columns:
-                transactions["risk_band"] = "Normal"
-
-            if "source" not in transactions.columns:
-                transactions["source"] = "CSV demo"
-
-            st.warning(
-                "Showing sample CSV data. The live SQLite database is unavailable."
-            )
-
-        if transactions.empty:
-            st.warning("No transactions are available.")
-
-        else:
-            # Ensure required columns exist.
-            for col in [
-                "transaction_id",
-                "transaction_time",
-                "amount",
-                "fraud_probability",
-                "prediction",
-                "risk_band",
-                "source",
-            ]:
-                if col not in transactions.columns:
-                    transactions[col] = "Unknown"
-
-            transactions["amount"] = pd.to_numeric(
-                transactions["amount"], errors="coerce"
-            )
-            transactions["fraud_probability"] = pd.to_numeric(
-                transactions["fraud_probability"], errors="coerce"
-            )
-
-            risk = (
-                transactions["risk_band"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
-
-            transactions["Displayed Risk"] = risk.map({
-                "low": "Normal",
-                "normal": "Normal",
-                "medium": "Review",
-                "review": "Review",
-                "high": "High Risk",
-                "high risk": "High Risk",
-            }).fillna("Other")
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Transactions", len(transactions))
-            c2.metric(
-                "Normal",
-                int((transactions["Displayed Risk"] == "Normal").sum()),
-            )
-            c3.metric(
-                "Review",
-                int((transactions["Displayed Risk"] == "Review").sum()),
-            )
-            c4.metric(
-                "High Risk",
-                int((transactions["Displayed Risk"] == "High Risk").sum()),
-            )
-
-            left, right = st.columns(2)
-
-            with left:
-                st.subheader("Risk Distribution")
-                risk_counts = (
-                    transactions["Displayed Risk"]
-                    .value_counts()
-                    .reindex(
-                        ["Normal", "Review", "High Risk", "Other"],
-                        fill_value=0,
-                    )
-                )
-                st.bar_chart(risk_counts)
-
-            with right:
-                st.subheader("Transaction Amounts")
-                amount_data = transactions[
-                    ["transaction_time", "amount"]
-                ].dropna()
-
-                if not amount_data.empty:
-                    st.line_chart(
-                        amount_data.set_index("transaction_time")
-                    )
-                else:
-                    st.info("No transaction amounts are available to chart.")
-
-            st.divider()
-            st.subheader("🧾 Recent Transactions")
-
-            st.dataframe(
-                transactions[
-                    [
-                        "transaction_id",
-                        "transaction_time",
-                        "amount",
-                        "fraud_probability",
-                        "prediction",
-                        "Displayed Risk",
-                        "source",
-                    ]
-                ].head(100),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.download_button(
-                "⬇️ Export Monitoring Data",
-                data=transactions.to_csv(index=False).encode("utf-8"),
-                file_name="cardshield_monitoring.csv",
-                mime="text/csv",
-                key="download_monitoring_data",
-            )
-
-            if st.button("🔄 Refresh Monitoring Data"):
-                st.rerun()
-
-            st.caption(
-                "Sample data is for demonstration. A risk label alone "
-                "does not confirm fraud."
-            )
+        render_live_monitoring()
 
     except Exception as exc:
-        st.error("Could not load monitoring data.")
+        st.error("Live Monitoring could not be loaded.")
         st.code(str(exc))
-# ---------------- SCREEN TRANSACTIONS ----------------
+        st.info(
+            "Check that live_monitoring.py exists in the "
+            "same project folder as app.py."
+        )
 
 
 
@@ -2177,6 +2116,89 @@ elif page == "Screen Transactions":
                 combined_df["Date"] = pd.to_datetime(
                     combined_df["Date"], errors="coerce"
                 )
+                
+            # Save uploaded transactions without overwriting existing records.
+            save_db_path = Path(__file__).resolve().parent / "cardshield_live.db"
+            saved_count = 0
+
+            with sqlite3.connect(str(save_db_path), timeout=10) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS uploaded_transactions (
+                        transaction_id TEXT PRIMARY KEY,
+                        transaction_time TEXT,
+                        amount REAL,
+                        transaction_type TEXT,
+                        description TEXT,
+                        source_file TEXT,
+                        scoring_status TEXT NOT NULL DEFAULT 'Not scored',
+                        details_json TEXT,
+                        uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                for _, row in combined_df.iterrows():
+                    source_file = str(row.get("Source File", "Uploaded CSV"))
+                    txn_date = row.get("Date", "")
+                    txn_time = str(row.get("Time", "") or "")
+                    description = str(row.get("Description", "") or "")
+                    txn_type = str(row.get("Type", "Unknown") or "Unknown")
+                    amount = float(row["Amount"])
+
+                    if pd.isna(txn_date):
+                        date_text = ""
+                    else:
+                        date_text = str(txn_date)
+
+                    raw_id = "|".join([
+                        source_file,
+                        date_text,
+                        txn_time,
+                        description,
+                        txn_type,
+                        str(amount),
+                        str(row.get("Transaction ID", "")),
+                        str(row.get("UTR", "")),
+                    ])
+                    transaction_id = hashlib.sha256(
+                        raw_id.encode("utf-8")
+                    ).hexdigest()
+
+                    details_json = row.to_json(
+                        date_format="iso",
+                        default_handler=str
+                    )
+
+                    cursor = conn.execute("""
+                        INSERT OR IGNORE INTO uploaded_transactions (
+                            transaction_id,
+                            transaction_time,
+                            amount,
+                            transaction_type,
+                            description,
+                            source_file,
+                            scoring_status,
+                            details_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, 'Not scored', ?)
+                    """, (
+                        transaction_id,
+                        f"{date_text} {txn_time}".strip(),
+                        amount,
+                        txn_type,
+                        description,
+                        source_file,
+                        details_json,
+                    ))
+
+                    saved_count += cursor.rowcount
+
+                conn.commit()
+
+            st.success(
+                f"Saved {saved_count} new transaction(s) to the database. "
+                "These records are not yet scored for fraud."
+            )
+
 
             st.divider()
             st.subheader("📊 Transaction Intelligence Dashboard")

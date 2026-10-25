@@ -519,3 +519,168 @@ def about():
             "It does not independently confirm fraud."
         ),
     }
+#if __name__ == "__main__":
+import os
+import json
+import hmac
+import hashlib
+import sqlite3
+
+from pathlib import Path
+from datetime import datetime, timezone
+from fastapi import Request, HTTPException
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+RAZORPAY_DB = BASE_DIR / "razorpay_transactions.db"
+
+
+def init_razorpay_db():
+    with sqlite3.connect(RAZORPAY_DB) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS razorpay_transactions (
+                event_id TEXT PRIMARY KEY,
+                payment_id TEXT,
+                order_id TEXT,
+                event_type TEXT,
+                amount_rupees REAL,
+                payment_status TEXT,
+                review_score INTEGER,
+                review_label TEXT,
+                received_at TEXT
+            )
+        """)
+
+
+def preliminary_review_score(amount_paise, event_type):
+    """
+    Temporary rules for demonstration only.
+    This is NOT a trained fraud-detection model.
+    """
+    score = 0
+
+    # Large transaction: flag for review, not automatically fraud.
+    if amount_paise >= 500000:  # Rs 5,000
+        score += 30
+
+    # A failed payment is not proof of fraud.
+    if event_type == "payment.failed":
+        score += 40
+
+    if score >= 60:
+        return score, "HIGH REVIEW"
+    elif score >= 30:
+        return score, "REVIEW"
+    return score, "LOW REVIEW"
+
+
+@app.post("/razorpay/webhook")
+async def razorpay_webhook(request: Request):
+    init_razorpay_db()
+
+    if not RAZORPAY_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="RAZORPAY_WEBHOOK_SECRET is not configured"
+        )
+
+    # Verify the signature against the exact raw request body.
+    raw_body = await request.body()
+    received_signature = request.headers.get(
+        "X-Razorpay-Signature", ""
+    )
+
+    expected_signature = hmac.new(
+        RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        expected_signature, received_signature
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Razorpay webhook signature"
+        )
+
+    try:
+        data = json.loads(raw_body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event_type = data.get("event", "unknown")
+    event_id = request.headers.get("x-razorpay-event-id")
+
+    # Fallback ID for deduplication if the event header is absent.
+    if not event_id:
+        event_id = hashlib.sha256(raw_body).hexdigest()
+
+    payment = (
+        data.get("payload", {})
+            .get("payment", {})
+            .get("entity", {})
+    )
+
+    payment_id = payment.get("id", "")
+    order_id = payment.get("order_id", "")
+    amount_paise = int(payment.get("amount", 0) or 0)
+    payment_status = payment.get("status", "unknown")
+
+    score, label = preliminary_review_score(
+        amount_paise, event_type
+    )
+
+    try:
+        with sqlite3.connect(RAZORPAY_DB) as conn:
+            conn.execute("""
+                INSERT INTO razorpay_transactions (
+                    event_id, payment_id, order_id, event_type,
+                    amount_rupees, payment_status, review_score,
+                    review_label, received_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                event_id,
+                payment_id,
+                order_id,
+                event_type,
+                amount_paise / 100,
+                payment_status,
+                score,
+                label,
+                datetime.now(timezone.utc).isoformat()
+            ))
+    except sqlite3.IntegrityError:
+        # Razorpay may retry the same event.
+        return {"received": True, "duplicate": True}
+
+    return {
+        "received": True,
+        "event": event_type,
+        "payment_id": payment_id,
+        "amount_rupees": amount_paise / 100,
+        "review_score": score,
+        "review_label": label,
+        "note": "Temporary rule-based review, not ML fraud probability"
+    }
+
+
+@app.get("/razorpay/recent")
+def razorpay_recent():
+    init_razorpay_db()
+
+    with sqlite3.connect(RAZORPAY_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT event_id, payment_id, order_id, event_type,
+                   amount_rupees, payment_status, review_score,
+                   review_label, received_at
+            FROM razorpay_transactions
+            ORDER BY received_at DESC
+            LIMIT 100
+        """).fetchall()
+
+    return {"transactions": [dict(row) for row in rows]}

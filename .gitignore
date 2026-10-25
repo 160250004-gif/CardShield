@@ -27,3 +27,22 @@ fraud_model_backup.pkl
 
 # Virtual environment and generated files
 fraud_data.csv
+# Local transaction data
+phonepe_transactions.csv
+phonepe_extracted.txt
+creditcard.csv
+demo_transactions.csv
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment and secrets
+.venv/
+.env
+.streamlit/secrets.toml
+
+# Python generated files
+__pycache__/
+*.pyc
