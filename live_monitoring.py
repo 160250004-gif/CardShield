@@ -1,22 +1,17 @@
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-import joblib
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "fraud_model.pkl"
 DB_PATH = BASE_DIR / "fraud_monitoring.db"
-DEMO_PATH = BASE_DIR / "demo_transactions.csv"
-DATA_PATH = BASE_DIR / "creditcard.csv"
-THRESHOLD = 0.50
 
 
 def init_db():
@@ -38,395 +33,589 @@ def init_db():
         """)
 
 
-@st.cache_resource
-def load_model():
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH.name}"
-        )
 
-    bundle = joblib.load(MODEL_PATH)
+def read_uploaded_statement(uploaded_file):
+    """Read CSV files and PhonePe statement PDFs."""
+    import re
 
-    if not isinstance(bundle, dict):
-        raise ValueError("fraud_model.pkl must contain a model bundle.")
+    suffix = Path(uploaded_file.name).suffix.lower()
 
-    model = bundle.get("model")
-    features = bundle.get("features")
+    if suffix == ".csv":
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file)
 
-    if model is None or not features:
-        raise ValueError("Model or model features are missing.")
-
-    if not hasattr(model, "predict_proba"):
-        raise ValueError("The model must support predict_proba().")
-
-    return model, list(features)
-
-
-@st.cache_data
-def load_sample_data(features):
-    # Prefer the small demo file to avoid loading the large dataset.
-    for path in (DEMO_PATH, DATA_PATH):
-        if not path.exists():
-            continue
-
+    elif suffix == ".pdf":
         try:
-            header = pd.read_csv(path, nrows=0).columns.tolist()
-            if not all(col in header for col in features):
+            import pdfplumber
+        except ImportError as exc:
+            raise ValueError(
+                "PDF support missing. Run: "
+                "python -m pip install pdfplumber"
+            ) from exc
+
+        uploaded_file.seek(0)
+        with pdfplumber.open(uploaded_file) as pdf:
+            text = "\n".join(
+                page.extract_text() or "" for page in pdf.pages
+            )
+
+        starts = list(re.finditer(
+            r"(?m)^\s*((?:Oct|Sept|Sep)\s+\d{1,2},\s+\d{4})\s+",
+            text,
+            re.IGNORECASE,
+        ))
+
+        records = []
+
+        for i, match in enumerate(starts):
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+            block = text[match.start():end]
+
+            type_match = re.search(r"\b(DEBIT|CREDIT)\b", block, re.I)
+            amount_match = re.search(
+                r"\b(?:DEBIT|CREDIT)\b\s*₹\s*([\d,]+(?:\.\d{1,2})?)",
+                block,
+                re.I,
+            )
+
+            if not type_match or not amount_match:
                 continue
 
-            sample = pd.read_csv(path, usecols=features)
+            first_line = block.splitlines()[0]
+            description = re.sub(
+                r"^\s*(?:Oct|Sept|Sep)\s+\d{1,2},\s+\d{4}\s*",
+                "",
+                first_line,
+                flags=re.I,
+            )
+            description = re.split(
+                r"\b(?:DEBIT|CREDIT)\b",
+                description,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip()
 
-            if not sample.empty:
-                for col in features:
-                    sample[col] = pd.to_numeric(
-                        sample[col], errors="coerce"
-                    )
+            if not description:
+                description = "Transaction"
 
-                sample = sample.replace(
-                    [np.inf, -np.inf], np.nan
-                ).dropna()
+            txn_match = re.search(
+                r"Transaction ID\s+([A-Za-z0-9]+)", block, re.I
+            )
+            utr_match = re.search(r"UTR No\.\s*(\d+)", block, re.I)
+            time_match = re.search(
+                r"(\d{1,2}\s+\d{2}\s+(?:am|pm))", block, re.I
+            )
 
-                if not sample.empty:
-                    return sample, path.name
+            records.append({
+                "Date": match.group(1),
+                "Time": time_match.group(1) if time_match else "",
+                "Transaction Details": description,
+                "Type": type_match.group(1).upper(),
+                "Amount": float(amount_match.group(1).replace(",", "")),
+                "Transaction ID": txn_match.group(1) if txn_match else "",
+                "UTR No": utr_match.group(1) if utr_match else "",
+            })
 
-        except Exception:
-            continue
+        df = pd.DataFrame(records)
 
-    raise ValueError(
-        "No usable sample dataset was found. "
-        "demo_transactions.csv or creditcard.csv must contain "
-        "all model feature columns."
+        if df.empty:
+            raise ValueError(
+                "No PhonePe transactions could be extracted from this PDF."
+            )
+
+    else:
+        raise ValueError("Please upload a CSV or PDF file.")
+
+    if df.empty:
+        raise ValueError("The uploaded file contains no transaction rows.")
+
+    df.columns = [
+        str(col).strip().replace("\n", " ") for col in df.columns
+    ]
+
+    return df.dropna(how="all").reset_index(drop=True)
+
+
+
+def find_column(df, keywords):
+
+    """Find a column using its name."""
+    for col in df.columns:
+        name = re.sub(r"[^a-z0-9]", "", str(col).lower())
+        if any(word in name for word in keywords):
+            return col
+    return None
+
+
+def amount_to_number(value):
+    """Convert common currency-formatted amounts to numbers."""
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.replace(",", "")
+    text = re.sub(r"(?i)INR|Rs\.?|₹|\$", "", text)
+    text = re.sub(r"[^0-9.\-]", "", text)
+
+    try:
+        amount = float(text)
+        if negative:
+            amount = -abs(amount)
+        return amount if pd.notna(amount) else None
+    except (TypeError, ValueError):
+        return None
+
+
+
+def screen_transactions(df):
+    """
+    Transparent rule-based screening.
+    This is not a trained fraud classifier and cannot prove fraud.
+    """
+    amount_col = find_column(
+        df, ["amount", "transactionvalue", "txnamount"]
+    )
+    description_col = find_column(
+        df, ["description", "remarks", "narration", "details", "merchant"]
+    )
+    status_col = find_column(df, ["status", "result"])
+    reference_col = find_column(
+        df, ["transactionid", "referenceid", "utr", "transactionreference"]
+    )
+    date_col = find_column(
+        df, ["date", "time", "timestamp", "transactiondate"]
     )
 
+    if amount_col is None:
+        raise ValueError(
+            "I could not identify an Amount column. "
+            "Please upload a CSV with a clearly named Amount column."
+        )
 
-def save_simulated_transaction(
-    transaction, score, prediction, simulation_id, row_number
-):
-    amount = float(transaction.get("Amount", 0.0))
-    flagged = int(prediction == "Potential Fraud")
+    result = df.copy()
+    result["Screening Amount"] = result[amount_col].apply(amount_to_number)
 
-    record = {
-        key: float(value)
-        for key, value in transaction.items()
+    if result["Screening Amount"].notna().sum() == 0:
+        raise ValueError(
+            "The Amount column was found, but no usable numeric amounts "
+            "could be read."
+        )
+
+    descriptions = (
+        result[description_col].fillna("").astype(str)
+        if description_col else pd.Series("", index=result.index)
+    )
+
+    statuses = (
+        result[status_col].fillna("").astype(str).str.lower()
+        if status_col else pd.Series("", index=result.index)
+    )
+
+    scores = []
+    reasons = []
+
+    # Duplicate reference numbers are a review signal, not proof of fraud.
+    duplicate_refs = pd.Series(False, index=result.index)
+    if reference_col:
+        refs = result[reference_col].fillna("").astype(str).str.strip()
+        valid_refs = refs.ne("")
+        duplicate_refs = refs.duplicated(keep=False) & valid_refs
+
+    for i in result.index:
+        score = 0
+        flags = []
+        amount = result.at[i, "Screening Amount"]
+        description = descriptions.at[i].lower()
+        status = statuses.at[i]
+
+        if pd.isna(amount):
+            flags.append("Amount could not be parsed")
+        else:
+            if abs(amount) >= 50000:
+                score += 35
+                flags.append("High-value transaction")
+            elif abs(amount) >= 20000:
+                score += 15
+                flags.append("Large transaction amount")
+
+            if amount < 0:
+                flags.append("Negative amount; check statement format")
+
+        if any(word in description for word in
+               ["failed", "reversed", "dispute", "chargeback"]):
+            score += 25
+            flags.append("Description mentions failure or dispute")
+
+        if any(word in status for word in ["failed", "reversed", "declined"]):
+            score += 25
+            flags.append("Status indicates failure or reversal")
+
+        if duplicate_refs.at[i]:
+            score += 25
+            flags.append("Duplicate transaction reference")
+
+        score = min(score, 100)
+        scores.append(score)
+        reasons.append("; ".join(flags) if flags else "No configured rule triggered")
+
+    result["Risk Score"] = scores
+    result["Screening Result"] = [
+        "Review Required" if score >= 40 else "No Rule Triggered"
+        for score in scores
+    ]
+    result["Review Reason"] = reasons
+
+    return result, {
+        "amount_column": amount_col,
+        "description_column": description_col,
+        "status_column": status_col,
+        "reference_column": reference_col,
+        "date_column": date_col,
     }
 
-    record["simulation_id"] = simulation_id
-    record["fraud_score"] = float(score)
-    record["prediction"] = prediction
-    record["source"] = "Automatic Simulator"
 
-    now = datetime.now().astimezone().isoformat(
-        timespec="seconds"
-    )
+def save_results(df, upload_id, file_name):
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
 
     with sqlite3.connect(DB_PATH, timeout=30) as conn:
-        conn.execute("""
-            INSERT INTO live_transactions (
-                upload_id, file_name, row_number, amount,
-                fraud_score, prediction, flagged_for_review,
-                actual_class, transaction_data, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            simulation_id,
-            "Automatic Simulator",
-            row_number,
-            amount,
-            float(score),
-            prediction,
-            flagged,
-            None,
-            json.dumps(record),
-            now,
-        ))
+        for i, row in df.iterrows():
+            amount = row.get("Screening Amount")
+            amount = None if pd.isna(amount) else float(amount)
+            score = float(row["Risk Score"])
+            prediction = str(row["Screening Result"])
+
+            record = {}
+            for key, value in row.items():
+                if pd.isna(value):
+                    record[str(key)] = None
+                elif hasattr(value, "item"):
+                    record[str(key)] = value.item()
+                else:
+                    record[str(key)] = str(value)
+
+            conn.execute("""
+                INSERT INTO live_transactions (
+                    upload_id, file_name, row_number, amount,
+                    fraud_score, prediction, flagged_for_review,
+                    actual_class, transaction_data, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                upload_id,
+                file_name,
+                int(i) + 1,
+                amount,
+                score / 100.0,
+                prediction,
+                int(prediction == "Review Required"),
+                None,
+                json.dumps(record, ensure_ascii=False),
+                now,
+            ))
 
 
 def render_live_monitoring():
     init_db()
 
+    st.title("📂 Uploaded Statement Screening")
     st.caption(
-        "Automatic sample transaction simulator. "
-        "This is a demonstration, not a live bank connection."
+        "Upload your own bank or payment statement. "
+        "Screening only starts after the file is read successfully."
     )
 
-    try:
-        model, features = load_model()
-        sample_data, source_name = load_sample_data(features)
-    except Exception as exc:
-        st.error(f"Simulator could not start: {exc}")
+    uploaded_file = st.file_uploader(
+        "Upload your statement",
+        type=["csv", "pdf"],
+        key="live_statement_upload",
+        help="CSV is recommended if your PDF has no extractable table.",
+    )
+
+    if uploaded_file is None:
+        st.info("Upload a CSV or PDF file to continue.")
+        st.session_state.pop("screening_result", None)
+        st.session_state.pop("screening_file_id", None)
         return
 
-    st.subheader("Automatic Transaction Simulator")
-    st.write(
-        f"Model: **{type(model).__name__}**  |  "
-        f"Threshold: **{THRESHOLD:.0%}**"
-    )
-    st.caption(f"Sample source: {source_name}")
-    
-    
-    st.subheader("📂 Upload Transaction Data")
+    file_id = f"{uploaded_file.name}:{uploaded_file.size}"
 
-    phonepe_file = st.file_uploader(
-        "Upload a transaction CSV or PDF file",
-        type=["csv"],
-        key="phonepe_upload",
+    # Do not reuse results from a different uploaded file.
+    if st.session_state.get("screening_file_id") != file_id:
+        st.session_state.pop("screening_result", None)
+        st.session_state["screening_file_id"] = file_id
+
+    try:
+        df = read_uploaded_statement(uploaded_file)
+    except Exception as exc:
+        st.error(f"File could not be read: {exc}")
+        st.warning("Screening is disabled until a readable file is uploaded.")
+        st.session_state.pop("screening_result", None)
+        return
+
+    st.success(
+        f"File uploaded and read successfully: {uploaded_file.name}"
+    )
+    st.write(f"Transactions/rows found: **{len(df):,}**")
+    st.subheader("File Preview")
+    st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+
+    st.caption(
+        "The rules below provide a basic review signal. "
+        "They are not proof of fraud and may flag legitimate transactions."
     )
 
-    if phonepe_file is not None:
+    if st.button(
+        "🔎 Screen Uploaded Transactions",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
-            phonepe_df = pd.read_csv(phonepe_file)
+            screened_df, detected_columns = screen_transactions(df)
+            upload_id = str(uuid.uuid4())
+            save_results(screened_df, upload_id, uploaded_file.name)
 
-            required_columns = [
-                "Date", "Transaction Details", "Type", "Amount"
+            st.session_state["screening_result"] = screened_df
+            st.session_state["screening_file_id"] = file_id
+            st.session_state["screening_upload_id"] = upload_id
+            st.session_state["screening_columns"] = detected_columns
+            st.session_state["screening_saved"] = True
+        except Exception as exc:
+            st.error(f"Screening could not be completed: {exc}")
+            st.session_state.pop("screening_result", None)
+            return
+
+    result = st.session_state.get("screening_result")
+
+    if result is not None:
+        st.success("Screening completed for the uploaded transactions.")
+
+        total = len(result)
+        flagged = int((result["Screening Result"] == "Review Required").sum())
+        other = total - flagged
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Rows Screened", total)
+        c2.metric("Review Required", flagged)
+        c3.metric("No Rule Triggered", other)
+
+       
+        # ---------- CARDShield INTERACTIVE RISK SIMULATOR ----------
+        import streamlit.components.v1 as components
+
+        st.divider()
+        st.subheader("🚦 CardShield Live Fraud Simulator")
+        st.caption(
+            "Green = Low Risk | Yellow = Medium Risk | Red = High Risk. "
+            "These are rule-based screening signals, not confirmed fraud."
+        )
+
+        if "Risk Category" not in result.columns:
+            result["Risk Category"] = result["Risk Score"].apply(
+                lambda score: (
+                    "High Risk" if score >= 40
+                    else "Medium Risk" if score >= 20
+                    else "Low Risk"
+                )
+            )
+            st.session_state["screening_result"] = result
+
+        total_transactions = len(result)
+
+        if total_transactions == 0:
+            st.info("No transactions available.")
+        else:
+            if "cardshield_selected_tx" not in st.session_state:
+                st.session_state.cardshield_selected_tx = 0
+
+            if "cardshield_last_alert_tx" not in st.session_state:
+                st.session_state.cardshield_last_alert_tx = None
+
+            # Keep selected transaction within range
+            idx = min(
+                st.session_state.cardshield_selected_tx,
+                total_transactions - 1,
+            )
+
+            selector_key = "cardshield_transaction_picker"
+
+            selected_idx = st.selectbox(
+                "Select a transaction",
+                options=list(range(total_transactions)),
+                index=idx,
+                format_func=lambda i: f"Transaction {i + 1}",
+                key=selector_key,
+            )
+
+            st.session_state.cardshield_selected_tx = selected_idx
+            current_tx = result.iloc[selected_idx]
+
+            risk = str(current_tx.get("Risk Category", "Low Risk"))
+
+            risk_colors = {
+                "Low Risk": "#22c55e",
+                "Medium Risk": "#f59e0b",
+                "High Risk": "#ef4444",
+            }
+            risk_labels = {
+                "Low Risk": "NORMAL",
+                "Medium Risk": "REVIEW",
+                "High Risk": "HIGH-RISK ALERT",
+            }
+
+            color = risk_colors.get(risk, "#64748b")
+            label = risk_labels.get(risk, "CHECK TRANSACTION")
+
+            # Play alert only once per newly selected high-risk row
+            if (
+                risk == "High Risk"
+                and st.session_state.cardshield_last_alert_tx
+                != selected_idx
+            ):
+                st.session_state.cardshield_last_alert_tx = selected_idx
+                components.html(
+                    """
+                    <audio autoplay>
+                      <source
+                        src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+                        type="audio/ogg">
+                    </audio>
+                    """,
+                    height=1,
+                )
+
+            st.markdown(
+                f"""
+                <div style="
+                    display:flex;
+                    align-items:center;
+                    gap:22px;
+                    padding:24px;
+                    border:1px solid {color};
+                    border-radius:18px;
+                    background:rgba(100,116,139,0.08);
+                ">
+                    <div style="
+                        width:82px;
+                        height:82px;
+                        flex-shrink:0;
+                        border-radius:50%;
+                        background:{color};
+                        box-shadow:0 0 22px {color};
+                        border:5px solid rgba(255,255,255,0.75);
+                    "></div>
+                    <div>
+                        <h2 style="margin:0;color:{color};">
+                            {label}
+                        </h2>
+                        <p style="margin:8px 0 0;">
+                            {risk}
+                        </p>
+                        <p style="margin:5px 0 0;">
+                            Transaction {selected_idx + 1} of
+                            {total_transactions}
+                        </p>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.progress(
+                (selected_idx + 1) / total_transactions,
+                text=f"Progress: {selected_idx + 1}/{total_transactions}",
+            )
+
+            left, right = st.columns(2)
+            with left:
+                st.metric("Risk Score", f"{current_tx['Risk Score']:.0f}/100")
+            with right:
+                st.metric(
+                    "Amount",
+                    str(current_tx.get("Amount", "N/A")),
+                )
+
+            st.markdown("#### Current Transaction Details")
+
+            detail_fields = [
+                "Date", "Time", "Transaction Details", "Type",
+                "Amount", "Transaction ID", "UTR No", "Review Reason",
+            ]
+            available_fields = [
+                field for field in detail_fields
+                if field in result.columns
             ]
 
-            missing = [
-                col for col in required_columns
-                if col not in phonepe_df.columns
-            ]
-
-            if missing:
-                st.error(
-                    "Missing columns: " + ", ".join(missing)
+            if available_fields:
+                st.dataframe(
+                    result.iloc[[selected_idx]][available_fields],
+                    use_container_width=True,
+                    hide_index=True,
                 )
             else:
-                phonepe_df["Type"] = (
-                    phonepe_df["Type"]
-                    .astype(str).str.strip().str.upper()
-                )
-                phonepe_df["Amount"] = pd.to_numeric(
-                    phonepe_df["Amount"], errors="coerce"
-                ).fillna(0)
-
-                debit = phonepe_df["Type"].eq("DEBIT")
-                credit = phonepe_df["Type"].eq("CREDIT")
-
-                details = (
-                    phonepe_df["Transaction Details"]
-                    .fillna("").astype(str).str.strip().str.lower()
-                )
-
-                repeated = details[debit].map(
-                    details[debit].value_counts()
-                ).fillna(0)
-
-                phonepe_df["Risk Level"] = "Low"
-                phonepe_df["Risk Reason"] = (
-                    "No configured rule triggered"
-                )
-
-                medium = (
-                    debit
-                    & (phonepe_df["Amount"] >= 2000)
-                    & (phonepe_df["Amount"] < 5000)
-                )
-                high = debit & (phonepe_df["Amount"] >= 5000)
-                repeated_debit = debit & (repeated >= 3)
-
-                phonepe_df.loc[medium, "Risk Level"] = "Medium"
-                phonepe_df.loc[medium, "Risk Reason"] = (
-                    "Debit between ₹2,000 and ₹4,999"
-                )
-
-                phonepe_df.loc[high, "Risk Level"] = "High"
-                phonepe_df.loc[high, "Risk Reason"] = (
-                    "Debit of ₹5,000 or more"
-                )
-
-                repeated_low = (
-                    repeated_debit
-                    & phonepe_df["Risk Level"].eq("Low")
-                )
-                phonepe_df.loc[repeated_low, "Risk Level"] = "Medium"
-                phonepe_df.loc[repeated_low, "Risk Reason"] = (
-                    "Same payment details appear 3 or more times"
-                )
-
-                st.caption(
-                    "Rule-based risk indicators only, not confirmed fraud."
-                )
-
-                risk = phonepe_df["Risk Level"].value_counts()
-                a, b, c = st.columns(3)
-                a.metric("Low Risk", int(risk.get("Low", 0)))
-                b.metric("Medium Risk", int(risk.get("Medium", 0)))
-                c.metric("High Risk", int(risk.get("High", 0)))
-
-                a, b, c = st.columns(3)
-                a.metric("Transactions", len(phonepe_df))
-                b.metric(
-                    "Total Debits",
-                    f"₹{phonepe_df.loc[debit, 'Amount'].sum():,.2f}",
-                )
-                c.metric(
-                    "Total Credits",
-                    f"₹{phonepe_df.loc[credit, 'Amount'].sum():,.2f}",
-                )
-
                 st.dataframe(
-                    phonepe_df,
+                    result.iloc[[selected_idx]],
                     use_container_width=True,
                     hide_index=True,
                 )
 
-                st.download_button(
-                    "Download Analysis Results",
-                    data=phonepe_df.to_csv(
-                        index=False
-                    ).encode("utf-8-sig"),
-                    file_name="phonepe_analysis_results.csv",
-                    mime="text/csv",
-                    key="download_phonepe_results",
+            def go_previous():
+                new_index = max(
+                    0,
+                    st.session_state["cardshield_transaction_picker"] - 1,
+                )
+                st.session_state["cardshield_transaction_picker"] = new_index
+                st.session_state.cardshield_selected_tx = new_index
+
+            def go_next():
+                new_index = min(
+                    total_transactions - 1,
+                    st.session_state["cardshield_transaction_picker"] + 1,
+                )
+                st.session_state["cardshield_transaction_picker"] = new_index
+                st.session_state.cardshield_selected_tx = new_index
+
+            def reset_simulator():
+                st.session_state["cardshield_transaction_picker"] = 0
+                st.session_state.cardshield_selected_tx = 0
+
+            prev_col, next_col, reset_col = st.columns(3)
+
+            with prev_col:
+                st.button(
+                    "Previous",
+                    disabled=(selected_idx == 0),
+                    key="cardshield_previous",
+                    use_container_width=True,
+                    on_click=go_previous,
                 )
 
-        except Exception as exc:
-            st.error("Could not analyse the uploaded PhonePe CSV.")
-            st.code(str(exc))
-
-
-    if "sim_running" not in st.session_state:
-        st.session_state.sim_running = False
-
-    if "sim_id" not in st.session_state:
-        st.session_state.sim_id = str(uuid.uuid4())
-
-    if "sim_count" not in st.session_state:
-        st.session_state.sim_count = 0
-
-    if "sim_events" not in st.session_state:
-        st.session_state.sim_events = []
-
-    col1, col2, col3 = st.columns(3)
-
-    if col1.button(
-        "▶ Start Simulator",
-        type="primary",
-        use_container_width=True,
-    ):
-        st.session_state.sim_running = True
-        st.rerun()
-
-    if col2.button("⏸ Stop Simulator", use_container_width=True):
-        st.session_state.sim_running = False
-        st.rerun()
-
-    if col3.button("🔄 Reset Session", use_container_width=True):
-        st.session_state.sim_running = False
-        st.session_state.sim_id = str(uuid.uuid4())
-        st.session_state.sim_count = 0
-        st.session_state.sim_events = []
-        st.rerun()
-
-    if st.session_state.sim_running:
-        st.success("Simulator running — generating one transaction every 3 seconds.")
-    else:
-        st.info("Simulator stopped. Click Start Simulator to begin.")
-
-    @st.fragment(run_every=3)
-    def live_feed():
-        if st.session_state.sim_running:
-            # Pick a real feature row from the local sample data.
-            # No real customer or card details are generated.
-            index = int(np.random.randint(0, len(sample_data)))
-            row = sample_data.iloc[index].copy()
-
-            X = pd.DataFrame(
-                [[row[col] for col in features]],
-                columns=features,
-            )
-
-            probabilities = model.predict_proba(X)[0]
-            classes = list(model.classes_)
-
-            if 1 not in classes:
-                st.error("Model does not contain fraud class 1.")
-                return
-
-            score = float(probabilities[classes.index(1)])
-            prediction = (
-                "Potential Fraud"
-                if score >= THRESHOLD
-                else "Normal"
-            )
-
-            st.session_state.sim_count += 1
-            count = st.session_state.sim_count
-
-            transaction = {
-                col: float(row[col])
-                for col in features
-            }
-
-            save_simulated_transaction(
-                transaction=transaction,
-                score=score,
-                prediction=prediction,
-                simulation_id=st.session_state.sim_id,
-                row_number=count,
-            )
-
-            event = {
-                "Transaction #": count,
-                "Time": datetime.now().strftime("%H:%M:%S"),
-                "Amount": transaction.get("Amount", 0.0),
-                "Fraud Probability": score,
-                "Result": prediction,
-            }
-
-            st.session_state.sim_events.insert(0, event)
-            st.session_state.sim_events = (
-                st.session_state.sim_events[:100]
-            )
-
-            if prediction == "Potential Fraud":
-                st.error(
-                    f"🚨 Risk alert: Transaction #{count} "
-                    f"has a model score of {score:.1%}. "
-                    "Please review it."
+            with next_col:
+                st.button(
+                    "Next Transaction",
+                    disabled=(selected_idx >= total_transactions - 1),
+                    key="cardshield_next",
+                    type="primary",
+                    use_container_width=True,
+                    on_click=go_next,
                 )
 
-        events = st.session_state.sim_events
+            with reset_col:
+                st.button(
+                    "Reset",
+                    key="cardshield_reset",
+                    use_container_width=True,
+                    on_click=reset_simulator,
+                )
 
-        total = st.session_state.sim_count
-        flagged = sum(
-            e["Result"] == "Potential Fraud" for e in events
-        )
-
-        a, b, c = st.columns(3)
-        a.metric("Transactions Generated", total)
-        b.metric("Alerts in Recent 100", flagged)
-        c.metric(
-            "Normal in Recent 100",
-            len(events) - flagged,
-        )
-
-        st.subheader("Latest Simulated Transactions")
-
-        if events:
-            st.dataframe(
-                pd.DataFrame(events),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.bar_chart(
-                pd.DataFrame(events).set_index("Transaction #")[
-                    "Fraud Probability"
-                ]
-            )
-        else:
-            st.info(
-                "No transactions yet. Start the simulator to see results."
+            st.caption(
+                "Alert audio requires internet access and may be blocked "
+                "by browser autoplay settings. High risk means review is "
+                "recommended; it does not prove fraud."
             )
 
-        st.caption(
-            "The simulator samples rows from the local dataset and "
-            "runs model predictions on them. These are demonstrations, "
-            "not newly observed bank transactions. A high score is not "
-            "proof of fraud."
-        )
-
-    live_feed()
-
-
-if __name__ == "__main__":
-    render_live_monitoring()
+          
+          
+           

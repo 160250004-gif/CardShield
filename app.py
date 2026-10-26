@@ -490,47 +490,100 @@ except Exception as exc:
     st.error(f"Could not load the trained model: {exc}")
     st.stop()
 
-# ---------------- SIDEBAR ----------------
-st.sidebar.title("CardShield")
 
+# ---------------- PROFESSIONAL SIDEBAR ----------------
+
+st.sidebar.markdown(
+    """
+    <div style="
+        padding: 18px 12px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #102347, #164e63);
+        margin-bottom: 18px;
+        text-align: center;
+    ">
+        <div style="font-size: 32px;">🛡️</div>
+        <div style="
+            font-size: 24px;
+            font-weight: 800;
+            color: white;
+        ">CardShield</div>
+        <div style="
+            font-size: 12px;
+            color: #cbd5e1;
+        ">AI-Powered Fraud Detection</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Logged-in user
 if st.session_state.auth_user:
-    st.sidebar.success(f"Welcome, {st.session_state.auth_user['name']}!")
-    st.sidebar.caption(st.session_state.auth_user["email"])
+    with st.sidebar.expander("👤 Account", expanded=False):
+        st.write(f"**{st.session_state.auth_user['name']}**")
+        st.caption(st.session_state.auth_user["email"])
 
-    if st.sidebar.button("Logout", use_container_width=True):
-        st.session_state.auth_user = None
-        st.rerun()
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.auth_user = None
+            st.rerun()
+
+st.sidebar.markdown("### 🧭 Workspace")
+st.sidebar.caption("Choose a section to continue")
+
+# Main navigation
+page_options = [
+    "Executive Overview",
+    "Fraud Analytics",
+    "Live Monitoring",
+    "Screen Transactions",
+    "Model Evaluation",
+    "Data Quality",
+]
+
+page_icons = {
+    "Executive Overview": "🏠",
+    "Fraud Analytics": "📊",
+    "Live Monitoring": "📡",
+    "Screen Transactions": "🔍",
+    "Model Evaluation": "🤖",
+    "Data Quality": "🧹",
+}
 
 page = st.sidebar.radio(
-    "Workspace",
-    [
-        "Executive Overview",
-        "Fraud Analytics",
-        "Live Monitoring",
-        "Screen Transactions",
-        "Model Evaluation",
-        "Data Quality",
-    ],
+    "Navigation",
+    page_options,
+    format_func=lambda item: f"{page_icons[item]}  {item}",
+    key="cardshield_sidebar_navigation",
+    label_visibility="collapsed",
 )
+
 st.sidebar.divider()
-st.sidebar.write("**Active model**")
+
+# Model information
+st.sidebar.markdown("### 🤖 Active Model")
 st.sidebar.info(str(model_name))
+
+# Fraud alert threshold
 threshold = st.sidebar.slider(
-    "Alert threshold",
+    "🚨 Alert threshold",
     min_value=0.05,
     max_value=0.95,
     value=0.50,
     step=0.05,
     help=(
-        "Transactions with a model score at or above this value are flagged for review. "
-        "A lower threshold usually catches more possible fraud but can create more false alerts."
+        "Transactions with a model score at or above this value "
+        "are flagged for review."
     ),
 )
+
 st.sidebar.caption(
-    "This is a demonstration tool. It is not connected to a bank, card network, or live transaction feed."
+    "Demo environment · Not connected to a real bank or live card network."
 )
 
 # Load the historical dataset when available.
+
+
+
 df = None
 dataset_error = None
 
@@ -691,9 +744,10 @@ elif page == "Screen Transactions":
         "Upload PDF and CSV files",
         type=["pdf", "csv"],
         accept_multiple_files=True,
-        key="combined_transaction_upload"
+     
+        
     )
-
+   
     if uploaded_files:
         all_transactions = []
 
@@ -1923,438 +1977,6 @@ elif page == "Live Monitoring":
 
 
 
-# ---------------- SCREEN TRANSACTIONS ----------------
-elif page == "Screen Transactions":
-    st.title("🔍 CardShield | Transaction Screening")
-    st.caption(
-        "Upload PhonePe PDF statements or CSV files for transaction analysis."
-    )
-
-    uploaded_files = st.file_uploader(
-        "Upload PDF and CSV files",
-        type=["pdf", "csv"],
-        accept_multiple_files=True,
-        key="combined_transaction_upload"
-    )
-
-    if uploaded_files:
-        all_transactions = []
-
-        for uploaded_file in uploaded_files:
-            try:
-                if uploaded_file.name.lower().endswith(".csv"):
-                    df = pd.read_csv(uploaded_file)
-
-                    # Normalize common CSV column names
-                    rename_map = {}
-                    for col in df.columns:
-                        name = str(col).strip().lower()
-                        if name in ["date", "transaction date"]:
-                            rename_map[col] = "Date"
-                        elif name in ["description", "merchant", "details", "narration"]:
-                            rename_map[col] = "Description"
-                        elif name in ["type", "transaction type", "dr/cr"]:
-                            rename_map[col] = "Type"
-                        elif name in ["amount", "transaction amount"]:
-                            rename_map[col] = "Amount"
-
-                    df = df.rename(columns=rename_map)
-
-                    if "Amount" in df.columns:
-                        df["Amount"] = pd.to_numeric(
-                            df["Amount"].astype(str).str.replace(
-                                r"[₹,\s]", "", regex=True
-                            ),
-                            errors="coerce"
-                        )
-
-                    df["Source File"] = uploaded_file.name
-                    all_transactions.append(df)
-
-                elif uploaded_file.name.lower().endswith(".pdf"):
-                    import datetime
-
-                    records = []
-                    date_pattern = re.compile(
-                        r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
-                        r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
-                        r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
-                        r"Dec(?:ember)?)\s+(\d{1,2}),\s*(\d{4})\s+(.*)$",
-                        re.IGNORECASE
-                    )
-                    amount_pattern = re.compile(
-                        r"\b(DEBIT|CREDIT)\s*₹\s*([\d,]+(?:\.\d{1,2})?)",
-                        re.IGNORECASE
-                    )
-
-                    with pdfplumber.open(uploaded_file) as pdf:
-                        for page_no, page_obj in enumerate(pdf.pages, 1):
-                            text = page_obj.extract_text() or ""
-                            blocks = []
-                            current = []
-
-                            for line in text.splitlines():
-                                line = line.strip()
-                                if date_pattern.match(line):
-                                    if current:
-                                        blocks.append(current)
-                                    current = [line]
-                                elif current:
-                                    current.append(line)
-
-                            if current:
-                                blocks.append(current)
-
-                            for block in blocks:
-                                match = date_pattern.match(block[0])
-                                if not match:
-                                    continue
-
-                                month, day, year, remainder = match.groups()
-                                try:
-                                    date_value = datetime.datetime.strptime(
-                                        f"{month[:3].title()} {day}, {year}",
-                                        "%b %d, %Y"
-                                    ).date()
-                                except ValueError:
-                                    continue
-
-                                amount_match = amount_pattern.search(remainder)
-                                if not amount_match:
-                                    continue
-
-                                txn_type = amount_match.group(1).upper()
-                                amount = float(
-                                    amount_match.group(2).replace(",", "")
-                                )
-                                description = remainder[:amount_match.start()].strip()
-
-                                txn_time = ""
-                                transaction_id = ""
-                                utr = ""
-
-                                for detail in block[1:]:
-                                    time_match = re.match(
-                                        r"^\s*(\d{4})\s*(am|pm)\b",
-                                        detail,
-                                        re.IGNORECASE
-                                    )
-                                    if time_match:
-                                        digits, ampm = time_match.groups()
-                                        hour = int(digits[:2])
-                                        minute = int(digits[2:])
-                                        if hour <= 12 and minute < 60:
-                                            hour = hour % 12
-                                            if ampm.lower() == "pm":
-                                                hour += 12
-                                            txn_time = f"{hour:02d}:{minute:02d}"
-
-                                    tid = re.search(
-                                        r"Transaction ID\s+([A-Za-z0-9]+)",
-                                        detail, re.IGNORECASE
-                                    )
-                                    if tid:
-                                        transaction_id = tid.group(1)
-
-                                    utr_match = re.search(
-                                        r"UTR No\.?\s*([A-Za-z0-9]+)",
-                                        detail, re.IGNORECASE
-                                    )
-                                    if utr_match:
-                                        utr = utr_match.group(1)
-
-                                records.append({
-                                    "Date": pd.Timestamp(date_value),
-                                    "Time": txn_time,
-                                    "Description": description,
-                                    "Type": txn_type,
-                                    "Amount": amount,
-                                    "Transaction ID": transaction_id,
-                                    "UTR": utr,
-                                    "Source File": uploaded_file.name,
-                                    "Source Page": page_no
-                                })
-
-                    if records:
-                        all_transactions.append(pd.DataFrame(records))
-                        st.success(
-                            f"Extracted {len(records)} transactions from "
-                            f"{uploaded_file.name}"
-                        )
-                    else:
-                        st.warning(
-                            f"No transactions were recognized in "
-                            f"{uploaded_file.name}. The parser expects a "
-                            "text-based PhonePe PDF in a supported format."
-                        )
-
-            except Exception as exc:
-                st.error(f"Could not process {uploaded_file.name}: {exc}")
-
-        if all_transactions:
-            combined_df = pd.concat(
-                all_transactions, ignore_index=True, sort=False
-            )
-
-            if "Amount" not in combined_df.columns:
-                st.error("No Amount column found. Check the CSV column names.")
-                st.stop()
-
-            combined_df["Amount"] = pd.to_numeric(
-                combined_df["Amount"], errors="coerce"
-            )
-            combined_df = combined_df.dropna(subset=["Amount"]).copy()
-
-            if "Type" not in combined_df.columns:
-                combined_df["Type"] = "Unknown"
-
-            combined_df["Type"] = (
-                combined_df["Type"].astype(str).str.upper().str.strip()
-            )
-
-            if "Date" in combined_df.columns:
-                combined_df["Date"] = pd.to_datetime(
-                    combined_df["Date"], errors="coerce"
-                )
-                
-            # Save uploaded transactions without overwriting existing records.
-            save_db_path = Path(__file__).resolve().parent / "cardshield_live.db"
-            saved_count = 0
-
-            with sqlite3.connect(str(save_db_path), timeout=10) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS uploaded_transactions (
-                        transaction_id TEXT PRIMARY KEY,
-                        transaction_time TEXT,
-                        amount REAL,
-                        transaction_type TEXT,
-                        description TEXT,
-                        source_file TEXT,
-                        scoring_status TEXT NOT NULL DEFAULT 'Not scored',
-                        details_json TEXT,
-                        uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-
-                for _, row in combined_df.iterrows():
-                    source_file = str(row.get("Source File", "Uploaded CSV"))
-                    txn_date = row.get("Date", "")
-                    txn_time = str(row.get("Time", "") or "")
-                    description = str(row.get("Description", "") or "")
-                    txn_type = str(row.get("Type", "Unknown") or "Unknown")
-                    amount = float(row["Amount"])
-
-                    if pd.isna(txn_date):
-                        date_text = ""
-                    else:
-                        date_text = str(txn_date)
-
-                    raw_id = "|".join([
-                        source_file,
-                        date_text,
-                        txn_time,
-                        description,
-                        txn_type,
-                        str(amount),
-                        str(row.get("Transaction ID", "")),
-                        str(row.get("UTR", "")),
-                    ])
-                    transaction_id = hashlib.sha256(
-                        raw_id.encode("utf-8")
-                    ).hexdigest()
-
-                    details_json = row.to_json(
-                        date_format="iso",
-                        default_handler=str
-                    )
-
-                    cursor = conn.execute("""
-                        INSERT OR IGNORE INTO uploaded_transactions (
-                            transaction_id,
-                            transaction_time,
-                            amount,
-                            transaction_type,
-                            description,
-                            source_file,
-                            scoring_status,
-                            details_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, 'Not scored', ?)
-                    """, (
-                        transaction_id,
-                        f"{date_text} {txn_time}".strip(),
-                        amount,
-                        txn_type,
-                        description,
-                        source_file,
-                        details_json,
-                    ))
-
-                    saved_count += cursor.rowcount
-
-                conn.commit()
-
-            st.success(
-                f"Saved {saved_count} new transaction(s) to the database. "
-                "These records are not yet scored for fraud."
-            )
-
-
-            st.divider()
-            st.subheader("📊 Transaction Intelligence Dashboard")
-
-            # Filters
-            f1, f2 = st.columns(2)
-            with f1:
-                types = sorted(combined_df["Type"].dropna().unique().tolist())
-                selected_types = st.multiselect(
-                    "Transaction type",
-                    types,
-                    default=types
-                )
-            with f2:
-                max_amount = float(combined_df["Amount"].max())
-                min_amount = float(combined_df["Amount"].min())
-                amount_range = st.slider(
-                    "Amount range",
-                    min_value=min_amount,
-                    max_value=max_amount if max_amount > min_amount else min_amount + 1.0,
-                    value=(min_amount, max_amount)
-                )
-
-            filtered = combined_df[
-                combined_df["Type"].isin(selected_types)
-                & combined_df["Amount"].between(
-                    amount_range[0], amount_range[1]
-                )
-            ].copy()
-
-            debit_mask = filtered["Type"].str.contains(
-                "DEBIT|DR|WITHDRAW", regex=True, na=False
-            )
-            credit_mask = filtered["Type"].str.contains(
-                "CREDIT|CR|DEPOSIT", regex=True, na=False
-            )
-
-            total_debit = filtered.loc[debit_mask, "Amount"].sum()
-            total_credit = filtered.loc[credit_mask, "Amount"].sum()
-            avg_amount = filtered["Amount"].mean() if not filtered.empty else 0
-
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Transactions", f"{len(filtered):,}")
-            k2.metric("Total Debit", f"₹{total_debit:,.2f}")
-            k3.metric("Total Credit", f"₹{total_credit:,.2f}")
-            k4.metric("Average Amount", f"₹{avg_amount:,.2f}")
-
-            if filtered.empty:
-                st.warning("No transactions match the selected filters.")
-            else:
-                left, right = st.columns(2)
-
-                with left:
-                    st.markdown("#### Debit vs Credit")
-                    flow_df = pd.DataFrame({
-                        "Category": ["Debit", "Credit"],
-                        "Amount": [total_debit, total_credit]
-                    })
-                    fig = px.pie(
-                        flow_df,
-                        names="Category",
-                        values="Amount",
-                        hole=0.58,
-                        title="Money Flow Distribution"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                with right:
-                    st.markdown("#### Transaction Amounts")
-                    fig = px.histogram(
-                        filtered,
-                        x="Amount",
-                        color="Type",
-                        nbins=25,
-                        title="Amount Distribution",
-                        marginal="box"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                if "Date" in filtered.columns and filtered["Date"].notna().any():
-                    daily = (
-                        filtered.dropna(subset=["Date"])
-                        .assign(Day=lambda x: x["Date"].dt.date)
-                        .groupby(["Day", "Type"], as_index=False)
-                        .agg(
-                            Transactions=("Amount", "size"),
-                            Total_Amount=("Amount", "sum")
-                        )
-                    )
-
-                    st.markdown("#### Daily Transaction Trend")
-                    fig = px.line(
-                        daily,
-                        x="Day",
-                        y="Total_Amount",
-                        color="Type",
-                        markers=True,
-                        title="Daily Transaction Value"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    fig = px.bar(
-                        daily,
-                        x="Day",
-                        y="Transactions",
-                        color="Type",
-                        barmode="group",
-                        title="Daily Transaction Count"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                if "Description" in filtered.columns:
-                    top = (
-                        filtered.assign(
-                            Description=filtered["Description"]
-                            .fillna("Unknown").astype(str)
-                        )
-                        .groupby("Description", as_index=False)
-                        .agg(
-                            Total_Amount=("Amount", "sum"),
-                            Transactions=("Amount", "size")
-                        )
-                        .sort_values("Total_Amount", ascending=False)
-                        .head(10)
-                    )
-
-                    st.markdown("#### Top 10 Transaction Descriptions")
-                    fig = px.bar(
-                        top.sort_values("Total_Amount"),
-                        x="Total_Amount",
-                        y="Description",
-                        orientation="h",
-                        hover_data=["Transactions"],
-                        title="Highest Transaction Values by Description"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                st.markdown("#### Combined Transaction Table")
-                st.dataframe(
-                    filtered,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.download_button(
-                    "⬇️ Download Filtered Transactions CSV",
-                    data=filtered.to_csv(index=False).encode("utf-8"),
-                    file_name="cardshield_filtered_transactions.csv",
-                    mime="text/csv"
-                )
-
-        else:
-            st.warning("No transactions were extracted from the selected files.")
-
-
-
 # ---------------- MODEL EVALUATION ----------------
 elif page == "Model Evaluation":
 
@@ -2789,6 +2411,8 @@ elif page == "Data Quality":
         )
 
         view_df = quality_df
+
+
 
         if search_text.strip():
             if search_column == "All columns":
